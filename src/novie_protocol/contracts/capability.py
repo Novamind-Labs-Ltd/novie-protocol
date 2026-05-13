@@ -1,0 +1,1219 @@
+"""Platform capability layer contracts.
+
+These dataclasses are the Phase 0 wire contract for the future thick capability
+gateway.  They intentionally live in ``novie_protocol`` before any runtime
+implementation so every caller shares the same schema, error codes, and response
+shape from the start.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+CapabilityStatus = Literal["alpha", "beta", "stable", "deprecated", "removed"]
+CapabilityKind = Literal[
+    "tool",
+    "agent_action",
+    "workflow",
+    "llm",
+    "memory",
+    "artifact",
+    "integration",
+    "project",
+    "platform_native",
+]
+CapabilityProvider = Literal["internal", "mcp", "openapi", "agent", "temporal", "llm_provider"]
+CapabilityRisk = Literal["read", "write", "dangerous"]
+CapabilitySideEffect = Literal["none", "session", "tenant", "external", "irreversible"]
+CapabilityExecKind = Literal["sync", "async", "stream", "workflow_handle"]
+CapabilityDurationClass = Literal["<1s", "<1min", "<1h", ">1h"]
+CapabilityCostTier = Literal["free", "cheap", "standard", "expensive", "critical"]
+CapabilityQualityTier = Literal["low", "standard", "high"]
+CapabilityCallerType = Literal[
+    "reception",
+    "planner",
+    "mcp",
+    "external_agent",
+    "executor",
+    "agent",
+    # External sync workers (Member/PMS fact projection). HTTP invoke uses caller_type.
+    "facts_projection",
+]
+CapabilityCallerMode = Literal["interactive", "preview", "execute", "delegated"]
+CapabilityInvokeMode = Literal["execute", "dry_run", "plan_eval"]
+CapabilityInvokeStatus = Literal["ok", "needs_confirmation", "denied", "error"]
+CapabilitySchemaCompat = Literal["compatible", "breaking", "unknown"]
+CapabilityMiddlewareStep = Literal[
+    "auth",
+    "policy",
+    "binding",
+    "quota",
+    "context_inject",
+    "invoke",
+    "usage_record",
+    "audit",
+    "response",
+]
+CapabilityMiddlewareStatus = Literal["pending", "ok", "skipped", "denied", "error"]
+
+# ── Capability governance schema (W1 of capability-contract orchestration) ──
+#
+# These vocabularies extend the agent-authored manifest entry with stable
+# metadata the platform compiler can read instead of stage-specific
+# planner if/else logic. The values intentionally describe *constraints
+# the capability declares about itself* rather than how a particular
+# stage should consume it.
+
+CapabilityExecutionLane = Literal["direct", "board_controlled"]
+"""How the capability is allowed to enter execution.
+
+- ``direct``: the platform may compile this capability into an executable
+  plan directly off LLM intent. Most read-only / analytical capabilities
+  use this lane.
+- ``board_controlled``: execution is gated on tracker / board state. The
+  capability cannot run from a planner draft alone — a tracker issue must
+  exist and a human must transition it to a runnable state. Used today by
+  ``cortex.execute_task_bundle``; replaces the bespoke "if cortex then
+  force task_splitter -> PMS" planner rule.
+"""
+
+CapabilityRiskClass = Literal["read_only", "repo_mutation", "external_write"]
+"""Coarse semantic risk taxonomy used by the dependency compiler.
+
+Distinct from the existing ``CapabilityRisk`` (``read``/``write``/
+``dangerous``) which describes the *invocation* surface. ``risk_class``
+describes the *kind* of side effect the capability ultimately causes,
+which is what governance and auditing care about.
+
+- ``read_only``: produces artifacts only; no external mutation.
+- ``repo_mutation``: edits a project repository (commits, PRs, etc.).
+- ``external_write``: mutates a non-repo external system (tracker write,
+  email, deployment, etc.).
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityGovernance:
+    """Governance flags declared on a capability manifest entry.
+
+    Each flag captures a constraint the platform compiler / runtime must
+    enforce before the capability may execute. Flags compose: a
+    capability with multiple governance requirements must satisfy all of
+    them.
+
+    Today's hardcoded planner rules ("repo_mutation must route through
+    sprint_planning", "cortex must be board-controlled") are special
+    cases of these declarations. The compiler that lands in W2 reads
+    these flags instead of agent-id checks.
+    """
+
+    requires_plan_review: bool = False
+    """The compiled plan must enter ``plan_review`` before any step
+    executes. Used for high-impact authoring flows."""
+
+    requires_tracker_issue: bool = False
+    """Execution may only begin from a runnable tracker issue (a
+    materialised PMS ticket transitioned to Todo). The compiler inserts
+    the ``ticket_drafts -> tracker_ingestion -> tracker_issue`` chain
+    upstream when needed; runtime denies execution if no issue is bound."""
+
+    requires_human_gate: bool = False
+    """A human gate must be raised + decided before execution proceeds.
+    Distinct from ``requires_plan_review``: this gates *runtime* not
+    plan approval."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requires_plan_review": self.requires_plan_review,
+            "requires_tracker_issue": self.requires_tracker_issue,
+            "requires_human_gate": self.requires_human_gate,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> CapabilityGovernance:
+        if not data:
+            return cls()
+        return cls(
+            requires_plan_review=bool(data.get("requires_plan_review", False)),
+            requires_tracker_issue=bool(data.get("requires_tracker_issue", False)),
+            requires_human_gate=bool(data.get("requires_human_gate", False)),
+        )
+
+
+CAPABILITY_MIDDLEWARE_CHAIN: tuple[CapabilityMiddlewareStep, ...] = (
+    "auth",
+    "policy",
+    "binding",
+    "quota",
+    "context_inject",
+    "invoke",
+    "usage_record",
+    "audit",
+    "response",
+)
+
+CapabilityErrorCode = Literal[
+    "denied_by_policy",
+    "denied_by_binding",
+    "quota_exceeded",
+    "unavailable_transient",
+    "unavailable_permanent",
+    "invalid_args",
+    "schema_violation",
+    "upstream_timeout",
+    "needs_confirmation",
+    "needs_capability_dependency",
+    "needs_runtime_context",
+    "capability_not_found",
+    "governance_boundary_unavailable",
+    "internal_error",
+]
+CAPABILITY_ERROR_CODES: tuple[str, ...] = (
+    "denied_by_policy",
+    "denied_by_binding",
+    "quota_exceeded",
+    "unavailable_transient",
+    "unavailable_permanent",
+    "invalid_args",
+    "schema_violation",
+    "upstream_timeout",
+    "needs_confirmation",
+    "needs_capability_dependency",
+    "needs_runtime_context",
+    "capability_not_found",
+    "governance_boundary_unavailable",
+    "internal_error",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCapabilityManifestEntry:
+    """Structured capability declaration published by an agent manifest.
+
+    This is the agent-authored boundary contract.  The platform may project it
+    into a ``PlatformCapability`` catalog record after applying bindings,
+    policy, observed reliability, and runtime metadata.
+    """
+
+    capability_id: str
+    version: str
+    display_name: str
+    description: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    risk: CapabilityRisk
+    side_effect: CapabilitySideEffect
+    exec_kind: CapabilityExecKind
+    runtime_ref: str
+    tags: tuple[str, ...] = ()
+    natural_language_aliases: tuple[str, ...] = ()
+    examples: tuple[dict[str, Any], ...] = ()
+    idempotent: bool = False
+    expected_duration_class: CapabilityDurationClass = "<1min"
+    streamable: bool = False
+    cancellation_supported: bool = False
+    progress_events: bool = False
+    dry_run_supported: bool = False
+    requires_confirmation: bool = False
+    requires: tuple[str, ...] = ()
+    conflicts: tuple[str, ...] = ()
+    provides: tuple[str, ...] = ()
+    consumes: tuple[str, ...] = ()
+    execution_lane: CapabilityExecutionLane = "direct"
+    risk_class: CapabilityRiskClass = "read_only"
+    governance: CapabilityGovernance = field(default_factory=CapabilityGovernance)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "tags",
+            "natural_language_aliases",
+            "examples",
+            "requires",
+            "conflicts",
+            "provides",
+            "consumes",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, tuple):
+                object.__setattr__(self, name, tuple(value))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capability_id": self.capability_id,
+            "version": self.version,
+            "display_name": self.display_name,
+            "description": self.description,
+            "input_schema": dict(self.input_schema),
+            "output_schema": dict(self.output_schema),
+            "risk": self.risk,
+            "side_effect": self.side_effect,
+            "exec_kind": self.exec_kind,
+            "runtime_ref": self.runtime_ref,
+            "tags": list(self.tags),
+            "natural_language_aliases": list(self.natural_language_aliases),
+            "examples": [dict(item) for item in self.examples],
+            "idempotent": self.idempotent,
+            "expected_duration_class": self.expected_duration_class,
+            "streamable": self.streamable,
+            "cancellation_supported": self.cancellation_supported,
+            "progress_events": self.progress_events,
+            "dry_run_supported": self.dry_run_supported,
+            "requires_confirmation": self.requires_confirmation,
+            "requires": list(self.requires),
+            "conflicts": list(self.conflicts),
+            "provides": list(self.provides),
+            "consumes": list(self.consumes),
+            "execution_lane": self.execution_lane,
+            "risk_class": self.risk_class,
+            "governance": self.governance.to_dict(),
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AgentCapabilityManifestEntry:
+        return cls(
+            capability_id=str(data["capability_id"]),
+            version=str(data["version"]),
+            display_name=str(data["display_name"]),
+            description=str(data.get("description") or ""),
+            input_schema=dict(data.get("input_schema") or {}),
+            output_schema=dict(data.get("output_schema") or {}),
+            risk=data["risk"],
+            side_effect=data["side_effect"],
+            exec_kind=data["exec_kind"],
+            runtime_ref=str(data.get("runtime_ref") or ""),
+            tags=tuple(data.get("tags") or ()),
+            natural_language_aliases=tuple(data.get("natural_language_aliases") or ()),
+            examples=tuple(dict(item) for item in data.get("examples") or ()),
+            idempotent=bool(data.get("idempotent", False)),
+            expected_duration_class=data.get("expected_duration_class", "<1min"),
+            streamable=bool(data.get("streamable", False)),
+            cancellation_supported=bool(data.get("cancellation_supported", False)),
+            progress_events=bool(data.get("progress_events", False)),
+            dry_run_supported=bool(data.get("dry_run_supported", False)),
+            requires_confirmation=bool(data.get("requires_confirmation", False)),
+            requires=tuple(data.get("requires") or ()),
+            conflicts=tuple(data.get("conflicts") or ()),
+            provides=tuple(data.get("provides") or ()),
+            consumes=tuple(data.get("consumes") or ()),
+            execution_lane=data.get("execution_lane", "direct"),
+            risk_class=data.get("risk_class", "read_only"),
+            governance=CapabilityGovernance.from_dict(data.get("governance")),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityMiddlewareRecord:
+    """One immutable record emitted by a thick gateway middleware step."""
+
+    step: CapabilityMiddlewareStep
+    status: CapabilityMiddlewareStatus
+    error_code: CapabilityErrorCode | None = None
+    explanation: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    latency_ms: int | None = None
+    side_effect_refs: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.side_effect_refs, tuple):
+            object.__setattr__(self, "side_effect_refs", tuple(self.side_effect_refs))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step": self.step,
+            "status": self.status,
+            "error_code": self.error_code,
+            "explanation": self.explanation,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "latency_ms": self.latency_ms,
+            "side_effect_refs": list(self.side_effect_refs),
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityMiddlewareRecord:
+        return cls(
+            step=data["step"],
+            status=data["status"],
+            error_code=data.get("error_code"),
+            explanation=data.get("explanation"),
+            started_at=data.get("started_at"),
+            finished_at=data.get("finished_at"),
+            latency_ms=data.get("latency_ms"),
+            side_effect_refs=tuple(data.get("side_effect_refs") or ()),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityCatalogFilter:
+    """Structured filters for catalog list and search APIs."""
+
+    enabled_for: tuple[CapabilityCallerType, ...] = ()
+    kinds: tuple[CapabilityKind, ...] = ()
+    providers: tuple[CapabilityProvider, ...] = ()
+    risk: tuple[CapabilityRisk, ...] = ()
+    tags: tuple[str, ...] = ()
+    requires_binding: bool | None = None
+    supports_dry_run: bool | None = None
+    streamable: bool | None = None
+    project_id: str | None = None
+    workspace_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("enabled_for", "kinds", "providers", "risk", "tags"):
+            value = getattr(self, name)
+            if not isinstance(value, tuple):
+                object.__setattr__(self, name, tuple(value))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled_for": list(self.enabled_for),
+            "kinds": list(self.kinds),
+            "providers": list(self.providers),
+            "risk": list(self.risk),
+            "tags": list(self.tags),
+            "requires_binding": self.requires_binding,
+            "supports_dry_run": self.supports_dry_run,
+            "streamable": self.streamable,
+            "project_id": self.project_id,
+            "workspace_id": self.workspace_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> CapabilityCatalogFilter:
+        if not data:
+            return cls()
+        return cls(
+            enabled_for=tuple(data.get("enabled_for") or ()),
+            kinds=tuple(data.get("kinds") or ()),
+            providers=tuple(data.get("providers") or ()),
+            risk=tuple(data.get("risk") or ()),
+            tags=tuple(data.get("tags") or ()),
+            requires_binding=data.get("requires_binding"),
+            supports_dry_run=data.get("supports_dry_run"),
+            streamable=data.get("streamable"),
+            project_id=data.get("project_id"),
+            workspace_id=data.get("workspace_id"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilitySearchRequest:
+    """Request body for ``POST /capabilities/search``."""
+
+    query: str
+    caller: CallerFrame
+    filters: CapabilityCatalogFilter = field(default_factory=CapabilityCatalogFilter)
+    limit: int = 20
+    include_examples: bool = False
+    include_deprecated: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "query": self.query,
+            "caller": self.caller.to_dict(),
+            "filters": self.filters.to_dict(),
+            "limit": self.limit,
+            "include_examples": self.include_examples,
+            "include_deprecated": self.include_deprecated,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilitySearchRequest:
+        return cls(
+            query=str(data.get("query") or ""),
+            caller=CallerFrame.from_dict(dict(data["caller"])),
+            filters=CapabilityCatalogFilter.from_dict(data.get("filters")),
+            limit=int(data.get("limit", 20)),
+            include_examples=bool(data.get("include_examples", False)),
+            include_deprecated=bool(data.get("include_deprecated", False)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilitySearchMatch:
+    """One scored catalog match for LLM or lexical capability search."""
+
+    capability: PlatformCapability
+    score: float
+    matched_aliases: tuple[str, ...] = ()
+    rationale: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.matched_aliases, tuple):
+            object.__setattr__(self, "matched_aliases", tuple(self.matched_aliases))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capability": self.capability.to_dict(),
+            "score": self.score,
+            "matched_aliases": list(self.matched_aliases),
+            "rationale": self.rationale,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilitySearchMatch:
+        return cls(
+            capability=PlatformCapability.from_dict(dict(data["capability"])),
+            score=float(data.get("score", 0.0)),
+            matched_aliases=tuple(data.get("matched_aliases") or ()),
+            rationale=data.get("rationale"),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilitySearchResponse:
+    """Response body for capability search."""
+
+    query: str
+    matches: tuple[CapabilitySearchMatch, ...]
+    ambiguous: bool = False
+    classifier_metrics: dict[str, float] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.matches, tuple):
+            object.__setattr__(self, "matches", tuple(self.matches))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "query": self.query,
+            "matches": [match.to_dict() for match in self.matches],
+            "ambiguous": self.ambiguous,
+            "classifier_metrics": dict(self.classifier_metrics),
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilitySearchResponse:
+        return cls(
+            query=str(data.get("query") or ""),
+            matches=tuple(
+                CapabilitySearchMatch.from_dict(dict(item))
+                for item in data.get("matches", ())
+            ),
+            ambiguous=bool(data.get("ambiguous", False)),
+            classifier_metrics={
+                str(key): float(value)
+                for key, value in dict(data.get("classifier_metrics") or {}).items()
+            },
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityCatalogSnapshot:
+    """A tenant/workspace-scoped catalog snapshot returned by ``GET /capabilities``."""
+
+    catalog_version: str
+    generated_at: str
+    capabilities: tuple[PlatformCapability, ...]
+    filters: CapabilityCatalogFilter = field(default_factory=CapabilityCatalogFilter)
+    total: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.capabilities, tuple):
+            object.__setattr__(self, "capabilities", tuple(self.capabilities))
+        if self.total is None:
+            object.__setattr__(self, "total", len(self.capabilities))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "catalog_version": self.catalog_version,
+            "generated_at": self.generated_at,
+            "capabilities": [capability.to_dict() for capability in self.capabilities],
+            "filters": self.filters.to_dict(),
+            "total": self.total,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityCatalogSnapshot:
+        return cls(
+            catalog_version=str(data["catalog_version"]),
+            generated_at=str(data["generated_at"]),
+            capabilities=tuple(
+                PlatformCapability.from_dict(dict(item))
+                for item in data.get("capabilities", ())
+            ),
+            filters=CapabilityCatalogFilter.from_dict(data.get("filters")),
+            total=data.get("total"),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityInvocationTrace:
+    """Gateway trace for one capability invocation.
+
+    Runtime implementations must keep ``middleware_chain`` equal to
+    ``CAPABILITY_MIDDLEWARE_CHAIN`` unless the protocol version is changed.
+    """
+
+    trace_id: str
+    capability_id: str
+    middleware_chain: tuple[CapabilityMiddlewareStep, ...] = CAPABILITY_MIDDLEWARE_CHAIN
+    records: tuple[CapabilityMiddlewareRecord, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.middleware_chain, tuple):
+            object.__setattr__(self, "middleware_chain", tuple(self.middleware_chain))
+        if not isinstance(self.records, tuple):
+            object.__setattr__(self, "records", tuple(self.records))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trace_id": self.trace_id,
+            "capability_id": self.capability_id,
+            "middleware_chain": list(self.middleware_chain),
+            "records": [record.to_dict() for record in self.records],
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityInvocationTrace:
+        return cls(
+            trace_id=str(data["trace_id"]),
+            capability_id=str(data["capability_id"]),
+            middleware_chain=tuple(data.get("middleware_chain") or CAPABILITY_MIDDLEWARE_CHAIN),
+            records=tuple(
+                CapabilityMiddlewareRecord.from_dict(dict(item))
+                for item in data.get("records", ())
+            ),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SuggestedNextCapability:
+    """A provider-authored next action hint for Reception or operators."""
+
+    capability_id: str
+    rationale: str
+    confidence: float
+    args_hint: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capability_id": self.capability_id,
+            "rationale": self.rationale,
+            "confidence": self.confidence,
+            "args_hint": dict(self.args_hint),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SuggestedNextCapability:
+        return cls(
+            capability_id=str(data["capability_id"]),
+            rationale=str(data.get("rationale") or ""),
+            confidence=float(data.get("confidence", 0.0)),
+            args_hint=dict(data.get("args_hint") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityExecutionHandle:
+    """Subscription handle returned by async, stream, or workflow capabilities."""
+
+    run_id: str
+    session_event_filter: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "session_event_filter": dict(self.session_event_filter),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityExecutionHandle:
+        return cls(
+            run_id=str(data["run_id"]),
+            session_event_filter=dict(data.get("session_event_filter") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityEscalation:
+    """How a denied caller can request access or human approval."""
+
+    approver_role: str
+    request_capability: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "approver_role": self.approver_role,
+            "request_capability": self.request_capability,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityEscalation:
+        return cls(
+            approver_role=str(data["approver_role"]),
+            request_capability=data.get("request_capability"),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CallerFrame:
+    """Identity of the capability caller and its side-effect mode."""
+
+    type: CapabilityCallerType
+    id: str
+    mode: CapabilityCallerMode
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": self.type, "id": self.id, "mode": self.mode}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CallerFrame:
+        return cls(
+            type=data["type"],
+            id=str(data["id"]),
+            mode=data["mode"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityInvokeContext:
+    """Scoped tenant/session/runtime context passed into a capability invoke."""
+
+    tenant_id: str
+    workspace_id: str
+    project_id: str | None = None
+    session_id: str | None = None
+    run_id: str | None = None
+    request_id: str | None = None
+    trace_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "tenant_id": self.tenant_id,
+            "workspace_id": self.workspace_id,
+            "project_id": self.project_id,
+            "session_id": self.session_id,
+            "run_id": self.run_id,
+            "request_id": self.request_id,
+            "trace_id": self.trace_id,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityInvokeContext:
+        return cls(
+            tenant_id=str(data["tenant_id"]),
+            workspace_id=str(data["workspace_id"]),
+            project_id=data.get("project_id"),
+            session_id=data.get("session_id"),
+            run_id=data.get("run_id"),
+            request_id=data.get("request_id"),
+            trace_id=data.get("trace_id"),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityConfirmation:
+    """Confirmation state supplied by the caller."""
+
+    confirmed: bool = False
+    decision_id: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"confirmed": self.confirmed, "decision_id": self.decision_id}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> CapabilityConfirmation:
+        if not data:
+            return cls()
+        return cls(
+            confirmed=bool(data.get("confirmed", False)),
+            decision_id=data.get("decision_id"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityInvokeRequest:
+    """Canonical request for ``POST /capabilities/{capability_id}/invoke``."""
+
+    caller: CallerFrame
+    context: CapabilityInvokeContext
+    arguments: dict[str, Any] = field(default_factory=dict)
+    implicit_args_resolution: Literal["auto", "disabled", "strict"] = "auto"
+    confirmation: CapabilityConfirmation = field(default_factory=CapabilityConfirmation)
+    mode: CapabilityInvokeMode = "execute"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "caller": self.caller.to_dict(),
+            "context": self.context.to_dict(),
+            "implicit_args_resolution": self.implicit_args_resolution,
+            "arguments": dict(self.arguments),
+            "confirmation": self.confirmation.to_dict(),
+            "mode": self.mode,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityInvokeRequest:
+        return cls(
+            caller=CallerFrame.from_dict(dict(data["caller"])),
+            context=CapabilityInvokeContext.from_dict(dict(data["context"])),
+            implicit_args_resolution=data.get("implicit_args_resolution", "auto"),
+            arguments=dict(data.get("arguments") or {}),
+            confirmation=CapabilityConfirmation.from_dict(data.get("confirmation")),
+            mode=data.get("mode", "execute"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityInvokeResponse:
+    """Canonical response for all capability invocations."""
+
+    status: CapabilityInvokeStatus
+    result: dict[str, Any] | None = None
+    error_code: CapabilityErrorCode | None = None
+    explanation: str | None = None
+    retry_after_ms: int | None = None
+    decision_id: str | None = None
+    risk: CapabilityRisk | None = None
+    preview: dict[str, Any] | None = None
+    missing_binding: dict[str, Any] | None = None
+    escalation: CapabilityEscalation | None = None
+    execution_handle: CapabilityExecutionHandle | None = None
+    suggested_next_capabilities: tuple[SuggestedNextCapability, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.suggested_next_capabilities, tuple):
+            object.__setattr__(
+                self,
+                "suggested_next_capabilities",
+                tuple(self.suggested_next_capabilities),
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "result": self.result,
+            "error_code": self.error_code,
+            "explanation": self.explanation,
+            "retry_after_ms": self.retry_after_ms,
+            "decision_id": self.decision_id,
+            "risk": self.risk,
+            "preview": self.preview,
+            "missing_binding": self.missing_binding,
+            "escalation": self.escalation.to_dict() if self.escalation else None,
+            "execution_handle": (
+                self.execution_handle.to_dict() if self.execution_handle else None
+            ),
+            "suggested_next_capabilities": [
+                item.to_dict() for item in self.suggested_next_capabilities
+            ],
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityInvokeResponse:
+        return cls(
+            status=data["status"],
+            result=data.get("result"),
+            error_code=data.get("error_code"),
+            explanation=data.get("explanation"),
+            retry_after_ms=data.get("retry_after_ms"),
+            decision_id=data.get("decision_id"),
+            risk=data.get("risk"),
+            preview=data.get("preview"),
+            missing_binding=data.get("missing_binding"),
+            escalation=(
+                CapabilityEscalation.from_dict(dict(data["escalation"]))
+                if data.get("escalation")
+                else None
+            ),
+            execution_handle=(
+                CapabilityExecutionHandle.from_dict(dict(data["execution_handle"]))
+                if data.get("execution_handle")
+                else None
+            ),
+            suggested_next_capabilities=tuple(
+                SuggestedNextCapability.from_dict(dict(item))
+                for item in data.get("suggested_next_capabilities", ())
+            ),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformCapability:
+    """Stable catalog record for a platform, agent, or integration capability."""
+
+    capability_id: str
+    version: str
+    status: CapabilityStatus
+    display_name: str
+    description: str
+    kind: CapabilityKind
+    provider: CapabilityProvider
+    runtime_ref: str
+    input_schema: dict[str, Any]
+    output_schema: dict[str, Any]
+    risk: CapabilityRisk
+    side_effect: CapabilitySideEffect
+    exec_kind: CapabilityExecKind
+    tags: tuple[str, ...] = ()
+    compat_range: tuple[str, ...] = ()
+    replaced_by: str | None = None
+    migration_hint: str | None = None
+    input_schema_version: int = 1
+    introduced_at: str = ""
+    natural_language_aliases: tuple[str, ...] = ()
+    examples: tuple[dict[str, Any], ...] = ()
+    idempotent: bool = False
+    expected_duration_class: CapabilityDurationClass = "<1min"
+    streamable: bool = False
+    cancellation_supported: bool = False
+    progress_events: bool = False
+    dry_run_supported: bool = False
+    requires_confirmation: bool = False
+    cost_tier: CapabilityCostTier = "standard"
+    p50_latency_ms: int | None = None
+    p99_latency_ms: int | None = None
+    reliability_score: float | None = None
+    recent_error_rate: float | None = None
+    quality_tier: CapabilityQualityTier = "standard"
+    enabled_for: tuple[CapabilityCallerType, ...] = ()
+    scopes_required: tuple[str, ...] = ()
+    binding_required: bool = False
+    accepts_implicit_args: tuple[str, ...] = ()
+    usage_metering: dict[str, Any] = field(default_factory=dict)
+    requires: tuple[str, ...] = ()
+    conflicts: tuple[str, ...] = ()
+    dependencies: tuple[str, ...] = ()
+    provides: tuple[str, ...] = ()
+    consumes: tuple[str, ...] = ()
+    execution_lane: CapabilityExecutionLane = "direct"
+    risk_class: CapabilityRiskClass = "read_only"
+    governance: CapabilityGovernance = field(default_factory=CapabilityGovernance)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "tags",
+            "compat_range",
+            "natural_language_aliases",
+            "examples",
+            "enabled_for",
+            "scopes_required",
+            "accepts_implicit_args",
+            "requires",
+            "conflicts",
+            "dependencies",
+            "provides",
+            "consumes",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, tuple):
+                object.__setattr__(self, name, tuple(value))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capability_id": self.capability_id,
+            "version": self.version,
+            "status": self.status,
+            "compat_range": list(self.compat_range),
+            "replaced_by": self.replaced_by,
+            "migration_hint": self.migration_hint,
+            "input_schema_version": self.input_schema_version,
+            "introduced_at": self.introduced_at,
+            "display_name": self.display_name,
+            "description": self.description,
+            "kind": self.kind,
+            "provider": self.provider,
+            "runtime_ref": self.runtime_ref,
+            "tags": list(self.tags),
+            "natural_language_aliases": list(self.natural_language_aliases),
+            "examples": [dict(item) for item in self.examples],
+            "input_schema": dict(self.input_schema),
+            "output_schema": dict(self.output_schema),
+            "risk": self.risk,
+            "side_effect": self.side_effect,
+            "idempotent": self.idempotent,
+            "exec_kind": self.exec_kind,
+            "expected_duration_class": self.expected_duration_class,
+            "streamable": self.streamable,
+            "cancellation_supported": self.cancellation_supported,
+            "progress_events": self.progress_events,
+            "dry_run_supported": self.dry_run_supported,
+            "requires_confirmation": self.requires_confirmation,
+            "cost_tier": self.cost_tier,
+            "p50_latency_ms": self.p50_latency_ms,
+            "p99_latency_ms": self.p99_latency_ms,
+            "reliability_score": self.reliability_score,
+            "recent_error_rate": self.recent_error_rate,
+            "quality_tier": self.quality_tier,
+            "enabled_for": list(self.enabled_for),
+            "scopes_required": list(self.scopes_required),
+            "binding_required": self.binding_required,
+            "accepts_implicit_args": list(self.accepts_implicit_args),
+            "usage_metering": dict(self.usage_metering),
+            "requires": list(self.requires),
+            "conflicts": list(self.conflicts),
+            "dependencies": list(self.dependencies),
+            "provides": list(self.provides),
+            "consumes": list(self.consumes),
+            "execution_lane": self.execution_lane,
+            "risk_class": self.risk_class,
+            "governance": self.governance.to_dict(),
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PlatformCapability:
+        return cls(
+            capability_id=str(data["capability_id"]),
+            version=str(data["version"]),
+            status=data["status"],
+            compat_range=tuple(data.get("compat_range") or ()),
+            replaced_by=data.get("replaced_by"),
+            migration_hint=data.get("migration_hint"),
+            input_schema_version=int(data.get("input_schema_version", 1)),
+            introduced_at=str(data.get("introduced_at") or ""),
+            display_name=str(data["display_name"]),
+            description=str(data.get("description") or ""),
+            kind=data["kind"],
+            provider=data["provider"],
+            runtime_ref=str(data.get("runtime_ref") or ""),
+            tags=tuple(data.get("tags") or ()),
+            natural_language_aliases=tuple(data.get("natural_language_aliases") or ()),
+            examples=tuple(dict(item) for item in data.get("examples") or ()),
+            input_schema=dict(data.get("input_schema") or {}),
+            output_schema=dict(data.get("output_schema") or {}),
+            risk=data["risk"],
+            side_effect=data["side_effect"],
+            idempotent=bool(data.get("idempotent", False)),
+            exec_kind=data["exec_kind"],
+            expected_duration_class=data.get("expected_duration_class", "<1min"),
+            streamable=bool(data.get("streamable", False)),
+            cancellation_supported=bool(data.get("cancellation_supported", False)),
+            progress_events=bool(data.get("progress_events", False)),
+            dry_run_supported=bool(data.get("dry_run_supported", False)),
+            requires_confirmation=bool(data.get("requires_confirmation", False)),
+            cost_tier=data.get("cost_tier", "standard"),
+            p50_latency_ms=data.get("p50_latency_ms"),
+            p99_latency_ms=data.get("p99_latency_ms"),
+            reliability_score=data.get("reliability_score"),
+            recent_error_rate=data.get("recent_error_rate"),
+            quality_tier=data.get("quality_tier", "standard"),
+            enabled_for=tuple(data.get("enabled_for") or ()),
+            scopes_required=tuple(data.get("scopes_required") or ()),
+            binding_required=bool(data.get("binding_required", False)),
+            accepts_implicit_args=tuple(data.get("accepts_implicit_args") or ()),
+            usage_metering=dict(data.get("usage_metering") or {}),
+            requires=tuple(data.get("requires") or ()),
+            conflicts=tuple(data.get("conflicts") or ()),
+            dependencies=tuple(data.get("dependencies") or ()),
+            provides=tuple(data.get("provides") or ()),
+            consumes=tuple(data.get("consumes") or ()),
+            execution_lane=data.get("execution_lane", "direct"),
+            risk_class=data.get("risk_class", "read_only"),
+            governance=CapabilityGovernance.from_dict(data.get("governance")),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityPlanNodeDraft:
+    """Capability-first plan node target shape.
+
+    This is the protocol shape Planner should eventually emit.  Legacy
+    ``agent_id`` based nodes remain in older runtime contracts until the Phase 4
+    hard cut, but no new field is added here for that fallback.
+    """
+
+    node_id: str
+    required_capabilities: tuple[str, ...]
+    capability_args: dict[str, dict[str, Any]] = field(default_factory=dict)
+    implicit_runtime_context_refs: tuple[str, ...] = ()
+    fitness_score_breakdown: dict[str, dict[str, float]] = field(default_factory=dict)
+    risk_flags: tuple[str, ...] = ()
+    resolved_at_approval: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "required_capabilities",
+            "implicit_runtime_context_refs",
+            "risk_flags",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, tuple):
+                object.__setattr__(self, name, tuple(value))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "required_capabilities": list(self.required_capabilities),
+            "capability_args": {
+                capability_id: dict(args)
+                for capability_id, args in self.capability_args.items()
+            },
+            "implicit_runtime_context_refs": list(self.implicit_runtime_context_refs),
+            "fitness_score_breakdown": {
+                capability_id: dict(scores)
+                for capability_id, scores in self.fitness_score_breakdown.items()
+            },
+            "risk_flags": list(self.risk_flags),
+            "resolved_at_approval": self.resolved_at_approval,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityPlanNodeDraft:
+        return cls(
+            node_id=str(data["node_id"]),
+            required_capabilities=tuple(data.get("required_capabilities") or ()),
+            capability_args={
+                str(capability_id): dict(args)
+                for capability_id, args in dict(data.get("capability_args") or {}).items()
+            },
+            implicit_runtime_context_refs=tuple(
+                data.get("implicit_runtime_context_refs") or ()
+            ),
+            fitness_score_breakdown={
+                str(capability_id): {
+                    str(score_name): float(score)
+                    for score_name, score in dict(scores).items()
+                }
+                for capability_id, scores in dict(
+                    data.get("fitness_score_breakdown") or {}
+                ).items()
+            },
+            risk_flags=tuple(data.get("risk_flags") or ()),
+            resolved_at_approval=data.get("resolved_at_approval"),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityResolution:
+    """A frozen capability binding chosen for one approved plan node."""
+
+    node_id: str
+    required_capability: str
+    resolved_runtime_ref: str
+    resolved_capability_version: str
+    resolved_binding_id: str | None = None
+    resolved_credential_ref: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "required_capability": self.required_capability,
+            "resolved_runtime_ref": self.resolved_runtime_ref,
+            "resolved_capability_version": self.resolved_capability_version,
+            "resolved_binding_id": self.resolved_binding_id,
+            "resolved_credential_ref": self.resolved_credential_ref,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityResolution:
+        return cls(
+            node_id=str(data["node_id"]),
+            required_capability=str(data["required_capability"]),
+            resolved_runtime_ref=str(data["resolved_runtime_ref"]),
+            resolved_capability_version=str(data["resolved_capability_version"]),
+            resolved_binding_id=data.get("resolved_binding_id"),
+            resolved_credential_ref=data.get("resolved_credential_ref"),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityDriftReportItem:
+    """Difference between a prior frozen resolution and current catalog state."""
+
+    previous_capability_id: str
+    previous_version: str
+    current_status: CapabilityStatus
+    current_version: str
+    schema_compat: CapabilitySchemaCompat
+    binding_status: str
+    replaced_by: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "previous_capability_id": self.previous_capability_id,
+            "previous_version": self.previous_version,
+            "current_status": self.current_status,
+            "replaced_by": self.replaced_by,
+            "current_version": self.current_version,
+            "schema_compat": self.schema_compat,
+            "binding_status": self.binding_status,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityDriftReportItem:
+        return cls(
+            previous_capability_id=str(data["previous_capability_id"]),
+            previous_version=str(data["previous_version"]),
+            current_status=data["current_status"],
+            replaced_by=data.get("replaced_by"),
+            current_version=str(data["current_version"]),
+            schema_compat=data["schema_compat"],
+            binding_status=str(data["binding_status"]),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityResolutionSnapshot:
+    """Capability resolutions frozen when a plan is approved."""
+
+    plan_id: str
+    frozen_at: str
+    resolutions: tuple[CapabilityResolution, ...]
+    runtime_context_snapshot_ref: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resolutions, tuple):
+            object.__setattr__(self, "resolutions", tuple(self.resolutions))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "frozen_at": self.frozen_at,
+            "resolutions": [item.to_dict() for item in self.resolutions],
+            "runtime_context_snapshot_ref": self.runtime_context_snapshot_ref,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityResolutionSnapshot:
+        return cls(
+            plan_id=str(data["plan_id"]),
+            frozen_at=str(data["frozen_at"]),
+            resolutions=tuple(
+                CapabilityResolution.from_dict(dict(item))
+                for item in data.get("resolutions", ())
+            ),
+            runtime_context_snapshot_ref=data.get("runtime_context_snapshot_ref"),
+            metadata=dict(data.get("metadata") or {}),
+        )
