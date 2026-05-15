@@ -216,7 +216,7 @@ def project_session_event_kind(
         return "review_state"
     if kind in _RECOVERABILITY_KINDS:
         return "recoverability_update"
-    if kind == "agent.event.phase_changed" or kind == "agent.event.thinking":
+    if kind in {"agent.event.phase", "agent.event.phase_changed", "agent.event.thinking"}:
         return "step_status"
     if kind == "agent.stream_content" or kind == "agent.stream_start":
         return "stream_delta"

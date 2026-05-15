@@ -21,7 +21,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from .capability import AgentCapabilityManifestEntry
+from .capability import (
+    AgentCapabilityManifestEntry,
+    validate_capability_description,
+)
 
 # ── Protocol modes ──────────────────────────────────────────────────────────────
 
@@ -186,6 +189,12 @@ class AgentManifestV2:
         for capability in self.capability_manifest:
             if not capability.capability_id:
                 errors.append("capability_manifest entries must have non-empty capability_id")
+                continue
+            # Description-quality gate — see capability.py for rules.
+            # The CapabilityPicker (RoutingReplanner) depends on rich
+            # descriptions for correct routing; a thin description must
+            # block registration outright.
+            errors.extend(validate_capability_description(capability))
         return errors
 
     def to_dict(self) -> dict[str, Any]:

@@ -1217,3 +1217,72 @@ class CapabilityResolutionSnapshot:
             runtime_context_snapshot_ref=data.get("runtime_context_snapshot_ref"),
             metadata=dict(data.get("metadata") or {}),
         )
+
+
+# ── Capability description quality rules ─────────────────────────────────────
+#
+# The CapabilityPicker (LLM-driven RoutingReplanner) selects agents using
+# the ``description`` field of each capability. A vague description
+# directly degrades routing accuracy and gets the platform parked in
+# Human Review. Enforce minimum quality at registration time so a thin
+# manifest can never land in the registry in the first place.
+#
+# Two rules, both deterministic:
+#
+# - Length floor (``_DESCRIPTION_MIN_LENGTH``). 30 chars is enough for a
+#   short but real "<verb> <subject> <constraint>" sentence in either
+#   Chinese or English, and rejects every canonical placeholder we've
+#   seen in stub manifests ("todo", "no description", "stub", "TBD",
+#   "-", empty string). Production manifests are expected to do
+#   considerably better — the picker's routing accuracy correlates
+#   directly with description richness — but 30 is the floor below
+#   which the manifest is clearly unfit for routing.
+# - No duplication of ``display_name``. The laziest "fill the required
+#   field" workaround is to copy the display name into the description;
+#   detecting it is cheap and high-signal.
+#
+# A "placeholder phrase" blacklist was considered and rejected: every
+# canonical placeholder we'd want to block is already shorter than the
+# length floor, so the blacklist would never actually fire. If we ever
+# need to catch verbose-but-vacuous descriptions ("This capability is a
+# placeholder capability that placeholders things ..."), that's a
+# semantic check best done via conformance testing, not a hard-coded
+# substring list.
+
+_DESCRIPTION_MIN_LENGTH = 30
+
+
+def validate_capability_description(
+    entry: "AgentCapabilityManifestEntry",
+) -> list[str]:
+    """Return human-readable errors for a thin ``description``.
+
+    Returns ``[]`` when the description meets minimum quality rules:
+
+    1. Length >= ``_DESCRIPTION_MIN_LENGTH`` characters after strip.
+    2. Not equal to ``display_name`` (case-insensitive, both stripped).
+
+    The caller (``AgentManifestV2.validate``) flattens the errors into
+    its overall error list, which the ``/agents/register`` route then
+    surfaces as a 422 response — so an agent with a thin description
+    cannot register at all.
+    """
+    errors: list[str] = []
+    description = (entry.description or "").strip()
+    display_name = (entry.display_name or "").strip()
+    capability_id = entry.capability_id or "<unknown>"
+
+    if len(description) < _DESCRIPTION_MIN_LENGTH:
+        errors.append(
+            f"capability {capability_id!r}: description too short "
+            f"({len(description)} chars; minimum {_DESCRIPTION_MIN_LENGTH}). "
+            "Describe what the capability does, its inputs, and its side effects."
+        )
+        return errors
+
+    if description.lower() == display_name.lower():
+        errors.append(
+            f"capability {capability_id!r}: description duplicates display_name; "
+            "write a real explanation of what the capability does."
+        )
+    return errors

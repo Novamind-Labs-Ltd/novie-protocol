@@ -47,6 +47,11 @@ AuditEventKind = Literal[
     "session_resumed",            # 从 checkpoint resume
     # ── UNIVERSAL_CAPABILITY W4 invocation pipeline ──────────────────────────
     "capability_invoked",         # 单次 capability 调用通过 W4 chain (audit step)
+    # ── SYSTEM_DOCTOR ───────────────────────────────────────────────────────
+    "doctor_check_run",
+    "doctor_repair_previewed",
+    "doctor_repair_confirmed",
+    "doctor_repair_executed",
 ]
 
 

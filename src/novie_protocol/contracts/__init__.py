@@ -250,6 +250,26 @@ from .chat_context import (
     UserPinnedContextSource,
     chat_context_source_from_dict,
 )
+from .runtime_control import (
+    AttemptStatus,
+    ComponentKind,
+    ComponentRequirement,
+    ComponentStatus,
+    ExecutionAttempt,
+    GateKind,
+    GateStatus,
+    RunKind,
+    RunStatus,
+    RuntimeComponentRecord,
+    RuntimeGate,
+    RuntimeGateDecision,
+    RuntimeRun,
+    RuntimeStep,
+    RuntimeTrigger,
+    StepStatus as RuntimeStepStatus,
+    TriggerKind,
+    TriggerStatus,
+)
 from .agentic_os import (
     EnvironmentProfile,
     EnvironmentRiskTier,
@@ -331,6 +351,12 @@ from .usage import (
     UsageRecord,
     UsageSourceKind,
     UsageSummary,
+)
+from .entitlement import (
+    EntitlementDecision,
+    LlmKeyPolicy,
+    OrgTokenPool,
+    TokenReservation,
 )
 from .validated_plan import PlanRiskFlag, PlanRiskSeverity, ValidatedPattern, ValidatedPlan
 from .workflow_stream import (
@@ -597,4 +623,28 @@ __all__ = [
     "project_workflow_stream_event",
     "resolve_preset",
     "stage_for_title",
+    # runtime_control
+    "AttemptStatus",
+    "ComponentKind",
+    "ComponentRequirement",
+    "ComponentStatus",
+    "ExecutionAttempt",
+    "GateKind",
+    "GateStatus",
+    "RunKind",
+    "RunStatus",
+    "RuntimeComponentRecord",
+    "RuntimeGate",
+    "RuntimeGateDecision",
+    "RuntimeRun",
+    "RuntimeStep",
+    "RuntimeStepStatus",
+    "RuntimeTrigger",
+    "TriggerKind",
+    "TriggerStatus",
+    # entitlement
+    "EntitlementDecision",
+    "LlmKeyPolicy",
+    "OrgTokenPool",
+    "TokenReservation",
 ]

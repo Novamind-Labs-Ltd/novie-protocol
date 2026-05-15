@@ -15,8 +15,11 @@ from .contracts import (
     AuditEventKind,
     ChangeEvent,
     CheckpointSnapshot,
+    EntitlementDecision,
     ExecutionContext,
     ExternalAgentCheckpointRecord,
+    LlmKeyPolicy,
+    OrgTokenPool,
     PolicyDecision,
     PolicyRequest,
     ProjectSessionSummary,
@@ -315,6 +318,62 @@ class UsageLedgerService(Protocol):
     ) -> list[UsageRecord]: ...
 
 
+class EntitlementService(Protocol):
+    """Org-level LLM token pool and key-policy check (MVP).
+
+    ``novie_owned_key`` calls go through ``reserve → commit/refund``.
+    ``tenant_managed_key`` calls only write usage; ``reserve`` always
+    returns ``allow=True`` with ``reservation_id=None``.
+
+    The mock implementation lives in
+    ``novie_platform.infra.entitlement.mock``; a real billing/entitlement
+    service replaces it without changing this protocol.
+    """
+
+    async def get_llm_policy(self, org_id: str) -> LlmKeyPolicy:
+        """Return the active LLM key policy for an organisation."""
+        ...
+
+    async def get_pool(self, org_id: str) -> OrgTokenPool:
+        """Return the current token pool state for display / diagnostics."""
+        ...
+
+    async def reserve_tokens(
+        self,
+        org_id: str,
+        estimated_tokens: int,
+        request_id: str,
+    ) -> EntitlementDecision:
+        """Place a hold on the pool for the duration of one LLM call.
+
+        Returns ``allow=False`` when the pool is exhausted (only for
+        ``novie_owned_key`` orgs).  Always returns ``allow=True`` for
+        ``tenant_managed_key`` (no reservation placed).
+        """
+        ...
+
+    async def commit_tokens(
+        self,
+        reservation_id: str,
+        actual_tokens: int,
+    ) -> None:
+        """Finalise the reservation with real token count from LLM response.
+
+        Releases any difference between ``estimated_tokens`` and
+        ``actual_tokens`` back to the pool (if actual < estimated).
+        No-op when ``reservation_id`` is unknown / already committed.
+        """
+        ...
+
+    async def refund_tokens(self, reservation_id: str) -> None:
+        """Cancel a reservation and release all held tokens.
+
+        Called when an LLM call fails before completing.
+        No-op when ``reservation_id`` is unknown.
+        """
+        ...
+
+
 class QuotaService(Protocol):
     """Session-level runtime policy 的入口（P0-4 第 1 刀，phase-1: token quota）。
 
@@ -465,6 +524,11 @@ class PlatformServices:
     # Artifact index (PG-backed in production). Optional until wired by composition root.
     artifacts: ArtifactIndexReader | None = None
     external_agent_checkpoints: ExternalAgentCheckpointService | None = None
+
+    # Org-level LLM token pool & key-policy gate. Optional so existing
+    # deployments keep working; when None, platform.llm.* calls are allowed
+    # but not token-pool-gated (behaves like tenant_managed_key).
+    entitlement: EntitlementService | None = None
 
     @property
     def knowledge(self) -> KnowledgeService:
