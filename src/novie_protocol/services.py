@@ -307,6 +307,7 @@ class ExternalAgentCheckpointService(Protocol):
         owner_agent_id: str,
         thread_id: str,
         checkpoint_id: str | None = None,
+        step_id: str | None = None,
     ) -> ExternalAgentCheckpointRecord | None: ...
 
     async def list_history(
