@@ -137,6 +137,7 @@ _PLAN_LIFECYCLE_KINDS: frozenset[str] = frozenset({
     "plan_complete",
     "plan_error",
     "plan_cancelled",
+    "plan_replanned",
     "workflow_complete",
     "workflow_failed",
     "workflow_cancelled",
@@ -148,6 +149,7 @@ _STEP_LIFECYCLE_KINDS: frozenset[str] = frozenset({
     "step_complete",
     "step_completed",
     "step_failed",
+    "step_retry",
     "step_waiting",
     "step_skipped",
 })

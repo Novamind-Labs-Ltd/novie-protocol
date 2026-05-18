@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from novie_protocol.contracts import (
     ExecutionPlan,
     ExecutionStep,
     Intent,
     PmsIssueSnapshot,
+    assert_plan_mutation_principal,
+    assert_plan_session_immutable,
     project_plan_graph,
     project_pms_work_item,
 )
@@ -113,3 +116,108 @@ def test_intent_artifacts_in_normalizes_to_tuple() -> None:
         artifacts_in=["a1", "a2"],
     )
     assert intent.artifacts_in == ("a1", "a2")
+
+
+# ── ADR-027 plan mutation auth ────────────────────────────────────────
+
+
+def test_execution_plan_creator_fields_default_empty() -> None:
+    plan = ExecutionPlan(
+        plan_id="plan-default",
+        pattern="single",
+        steps=(ExecutionStep(step_id="s1", required_capabilities=("cap.x",)),),
+    )
+    assert plan.creator_principal_id == ""
+    assert plan.creator_session_id == ""
+
+
+def test_execution_plan_creator_fields_round_trip() -> None:
+    plan = ExecutionPlan(
+        plan_id="plan-attributed",
+        pattern="single",
+        steps=(ExecutionStep(step_id="s1", required_capabilities=("cap.x",)),),
+        creator_principal_id="user-42",
+        creator_session_id="sess-7",
+    )
+    assert plan.creator_principal_id == "user-42"
+    assert plan.creator_session_id == "sess-7"
+
+
+def test_assert_plan_mutation_principal_accepts_match() -> None:
+    assert_plan_mutation_principal(
+        creator_principal_id="user-1",
+        caller_principal_id="user-1",
+        op="cancel_plan",
+    )
+
+
+def test_assert_plan_mutation_principal_accepts_system_caller() -> None:
+    # Platform-internal background mutation (auto re-plan, TTL sweep,
+    # doctor) is trusted regardless of the original creator.
+    assert_plan_mutation_principal(
+        creator_principal_id="user-1",
+        caller_principal_id="system:auto-replan",
+        op="replan",
+    )
+
+
+def test_assert_plan_mutation_principal_rejects_foreign_caller() -> None:
+    with pytest.raises(PermissionError, match="plan mutation denied"):
+        assert_plan_mutation_principal(
+            creator_principal_id="user-owner",
+            caller_principal_id="user-intruder",
+            op="cancel_plan",
+        )
+
+
+def test_assert_plan_mutation_principal_fails_open_for_legacy_plan() -> None:
+    # ``creator_principal_id == ""`` marks a legacy plan with no
+    # attribution — fail-open during the migration window.
+    assert_plan_mutation_principal(
+        creator_principal_id="",
+        caller_principal_id="user-anyone",
+        op="cancel_plan",
+    )
+
+
+# ── ADR-027 plan_creator_session_id_immutable ────────────────────────
+
+
+def test_assert_plan_session_immutable_accepts_match() -> None:
+    assert_plan_session_immutable(
+        prior_session_id="sess-7",
+        new_session_id="sess-7",
+        op="replan",
+    )
+
+
+def test_assert_plan_session_immutable_rejects_session_swap() -> None:
+    with pytest.raises(PermissionError, match="plan session immutability denied"):
+        assert_plan_session_immutable(
+            prior_session_id="sess-original",
+            new_session_id="sess-intruder",
+            op="replan",
+        )
+
+
+def test_assert_plan_session_immutable_fails_open_for_legacy_plan() -> None:
+    # ``prior_session_id == ""`` marks a legacy plan; allow rebinding
+    # during the migration window per the docstring contract.
+    assert_plan_session_immutable(
+        prior_session_id="",
+        new_session_id="sess-new",
+        op="patch",
+    )
+
+
+def test_assert_plan_session_immutable_records_op_in_error() -> None:
+    with pytest.raises(PermissionError) as exc:
+        assert_plan_session_immutable(
+            prior_session_id="sess-original",
+            new_session_id="sess-other",
+            op="patch",
+        )
+    msg = str(exc.value)
+    assert "op=patch" in msg
+    assert "sess-original" in msg
+    assert "sess-other" in msg

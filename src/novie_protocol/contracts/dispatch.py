@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .failure_taxonomy import EXECUTION_FAILURE_TYPES
+
 DispatchEventKind = Literal[
     "plan_start",      # dispatch 开始；payload: plan_id, pattern, step_count
     "step_start",      # 单 step 进入；payload: step_id, agent_id, revision_count
@@ -20,6 +22,9 @@ DispatchEventKind = Literal[
                        #   status_kind, message, task_status, task_id
     "step_waiting",    # 单 step 进入等待态（例如外部 task 请求人工输入）；payload:
                        #   step_id, agent_id, message, task_status, task_id, resume_ref
+    "step_retry",      # transient failure 触发单 step 重试；payload: step_id,
+                       #   agent_id, attempt, max_retries, failure_type, error,
+                       #   backoff_seconds
     "step_tool_call",  # step 内 agent 正在调用工具；payload: step_id, agent_id,
                        #   tool_name, tool_args, tool_call_id
     "step_tool_result",# 对应工具返回；payload: step_id, agent_id, tool_name,
@@ -35,6 +40,8 @@ DispatchEventKind = Literal[
                               #   gate_id, after_step_id, max_revisions,
                               #   attempted_revision
     "plan_complete",   # 整 plan 完成；payload: plan_id
+    "plan_replanned",  # plan 版本被 re-plan 替换；payload: plan_id,
+                       #   old_plan_version, new_plan_version, trigger_source, reason
     "plan_paused",     # graph interrupt 挂起（durable 长任务 / HITL 等外部 resume）；
                        #   payload: plan_id, reason, tracker_id?, agent_task_id?, step_id?,
                        #   step_outputs（挂起前已完成的 step）
@@ -58,6 +65,15 @@ class DispatchEvent:
     kind: DispatchEventKind
     metadata: dict[str, Any] = field(default_factory=dict)
     source: str = "dispatch"
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("step_error", "plan_error"):
+            return
+        failure_type = str(self.metadata.get("failure_type") or "")
+        if failure_type not in EXECUTION_FAILURE_TYPES:
+            raise ValueError(
+                f"DispatchEvent {self.kind!r} requires metadata.failure_type"
+            )
 
 
 @dataclass(frozen=True, slots=True)

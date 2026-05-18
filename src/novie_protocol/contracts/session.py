@@ -57,7 +57,7 @@ SessionEventSource = Literal[
 
 
 SessionStatus = Literal["active", "waiting", "completed", "failed", "cancelled"]
-"""Session 生命周期状态。
+"""Session 任务运行状态（operational）。
 
 设计上故意只保留五档：
 - ``active``    ：至少一次 in-flight turn。
@@ -68,7 +68,193 @@ SessionStatus = Literal["active", "waiting", "completed", "failed", "cancelled"]
 
 进一步细分（如 ``draft / planning``）应通过 ``payload`` / ``metadata`` 表达，
 而不是膨胀此处的状态机。
+
+跟 ``SessionLifecycleState`` 的区别：``SessionStatus`` 描述"这一轮 turn /
+plan 在哪个 operational 阶段"；``SessionLifecycleState`` 描述"session 这个
+长期对象本身是 alive / dormant / closed / archived"。两者正交，分开追踪。
 """
+
+
+SessionLifecycleState = Literal["active", "idle", "closed", "archived"]
+"""Session 长期对象生命周期（custody）。
+
+ADR-027 锁的四档：
+
+- ``active``    ：用户近期有交互；SSE channel 活；checkpoint 热。
+- ``idle``      ：一段时间无交互但 user 未显式关闭；SSE 关闭、checkpoint 冷；
+                 新消息进来可以 reactivate 回 ``active``。
+- ``closed``    ：user 显式 end / 删除 chat thread；不可再 reactivate，
+                 但 history 在 ``archive_ttl`` 内仍可查。
+- ``archived``  ：TTL 已过；history 移到冷存储；UI 默认不显示。
+
+合法转换：
+  ``active   → idle``         （超过 ``active_idle_ttl_seconds`` 无新事件）
+  ``idle     → active``       （新消息到达；reactivate）
+  ``idle     → archived``     （超过 ``idle_archive_ttl_seconds``）
+  ``active   → closed``       （user 显式关闭）
+  ``closed   → archived``     （超过 ``closed_archive_ttl_seconds``）
+
+`closed` 不可回 `active`：用户要继续就 clone history 到新 session。这条
+invariant 跟 ``Plan.creator_session_id`` 的不可变性一起实现 ADR-027
+"plan 跨 session 时 viewer/operator 而非 creator" 的语义。
+"""
+
+
+# Default lifecycle TTLs (seconds). Tenant policy may shorten these (e.g. for
+# compliance retention windows) but never lengthen — short retention is the
+# safer default per ADR-027. The cleanup job that enforces transitions reads
+# both values; explicit per-tenant overrides win.
+DEFAULT_ACTIVE_IDLE_TTL_SECONDS: int = 30 * 60        # 30 minutes
+DEFAULT_IDLE_ARCHIVE_TTL_SECONDS: int = 7 * 24 * 3600   # 7 days
+DEFAULT_CLOSED_ARCHIVE_TTL_SECONDS: int = 90 * 24 * 3600  # 90 days
+
+
+# Allowed transitions between lifecycle states. Used by Phase 2's cleanup
+# job and by the SessionTimelineService.transition_lifecycle entry point
+# to reject illegal transitions at the API surface (closed → active is
+# blocked — clone instead).
+LIFECYCLE_TRANSITIONS: frozenset[tuple[SessionLifecycleState, SessionLifecycleState]] = frozenset(
+    {
+        ("active", "idle"),
+        ("idle", "active"),
+        ("idle", "archived"),
+        ("active", "closed"),
+        ("closed", "archived"),
+    }
+)
+
+
+def is_legal_lifecycle_transition(
+    src: SessionLifecycleState, dst: SessionLifecycleState,
+) -> bool:
+    """``True`` iff ``src → dst`` is in ``LIFECYCLE_TRANSITIONS``.
+
+    No-op transitions (``src == dst``) return ``True`` — the cleanup job
+    may write the same state again as a heartbeat without raising.
+    """
+    if src == dst:
+        return True
+    return (src, dst) in LIFECYCLE_TRANSITIONS
+
+
+# ── System ephemeral session (ADR-027) ─────────────────────────────
+
+
+# Reserved principal namespace prefix. Any principal id starting with
+# ``SYSTEM_PRINCIPAL_PREFIX`` is platform-owned — tenants cannot register
+# such principals. Enforcement lives in the member-service write path;
+# this constant is the canonical reference value.
+SYSTEM_PRINCIPAL_PREFIX: str = "system:"
+
+# Session id prefix for platform-internal background tasks (doctor /
+# self-heal / scheduled cron). The full shape is
+# ``f"{SYSTEM_SESSION_PREFIX}{task_name}:{run_id}"`` so audit / billing
+# can route every system invocation through a recognisable ephemeral
+# session that does **not** look like a real user chat thread.
+SYSTEM_SESSION_PREFIX: str = "system:"
+
+
+def is_system_principal(principal_id: str) -> bool:
+    """``True`` iff ``principal_id`` is reserved for platform use."""
+    return principal_id.startswith(SYSTEM_PRINCIPAL_PREFIX)
+
+
+def is_system_session(session_id: str) -> bool:
+    """``True`` iff ``session_id`` is an ephemeral platform-task session."""
+    return session_id.startswith(SYSTEM_SESSION_PREFIX)
+
+
+def mint_system_session_id(task_name: str, run_id: str) -> str:
+    """Build the canonical id for a system ephemeral session.
+
+    Used by the doctor / self-heal / scheduled-task entry points to mint
+    a session id that satisfies the ``every_workflow_run_has_session_id``
+    invariant (W0) without polluting a real user chat thread.
+
+    ``task_name`` and ``run_id`` must be non-empty; the result is
+    URL-safe (no spaces / slashes) by construction since callers pass
+    safe identifiers.
+    """
+    if not task_name:
+        raise ValueError("system session task_name must be non-empty")
+    if not run_id:
+        raise ValueError("system session run_id must be non-empty")
+    return f"{SYSTEM_SESSION_PREFIX}{task_name}:{run_id}"
+
+
+def mint_system_principal_id(component: str) -> str:
+    """Build a canonical principal id for a platform-owned actor.
+
+    ``component`` is a short identifier for the platform sub-system
+    (``doctor`` / ``self_heal`` / ``cron``). Returns a string in the
+    ``system:`` namespace so tenant-side principal validation rejects it
+    on the way in but the platform itself can audit it cleanly on the
+    way out.
+    """
+    if not component:
+        raise ValueError("system principal component must be non-empty")
+    return f"{SYSTEM_PRINCIPAL_PREFIX}{component}"
+
+
+class ReservedPrincipalNamespaceRejected(ValueError):
+    """User-supplied principal_id collides with the ``system:`` namespace.
+
+    ADR-027 reserves ``system:*`` for platform-owned background actors
+    (doctor / TTL sweeper / auto re-plan). Any tenant-supplied principal
+    id starting with that prefix must be rejected before it lands on a
+    plan / session / audit row — otherwise a tenant could later cancel
+    or mutate via ``assert_plan_mutation_principal``'s
+    ``startswith("system:")`` fail-open path.
+    """
+
+    def __init__(self, *, principal_id: str, field: str) -> None:
+        super().__init__(
+            f"principal_id {principal_id!r} on field {field!r} starts with the "
+            f"reserved {SYSTEM_PRINCIPAL_PREFIX!r} prefix; this namespace is "
+            "platform-owned (ADR-027)."
+        )
+        self.principal_id = principal_id
+        self.field = field
+
+
+class SessionNotFoundError(LookupError):
+    """Raised when a caller tries to write to a session that was not minted.
+
+    Session ids are durable runtime identities. They must be created through
+    the platform-owned session minting path before chat, workflow, or gate
+    events can append to the timeline.
+    """
+
+    def __init__(self, *, session_id: str) -> None:
+        super().__init__(f"session {session_id!r} was not explicitly created")
+        self.session_id = session_id
+
+
+def assert_user_principal_id(
+    principal_id: str,
+    *,
+    field: str = "principal_id",
+) -> str:
+    """Validate a user-supplied principal id and return it normalised.
+
+    Raises :class:`ReservedPrincipalNamespaceRejected` when the input
+    falls inside the ``system:`` namespace. Empty strings pass through
+    untouched — legacy plans without attribution are still tolerated
+    by ``assert_plan_mutation_principal`` and ``Plan.creator_principal_id``
+    defaulting to ``""`` is part of the migration contract.
+
+    ``field`` is surfaced inside the exception message so API
+    validators can render an actionable 422 (e.g.
+    ``"body.plan.creator_principal_id"``).
+    """
+    normalised = (principal_id or "").strip()
+    if not normalised:
+        return ""
+    if is_system_principal(normalised):
+        raise ReservedPrincipalNamespaceRejected(
+            principal_id=normalised, field=field,
+        )
+    return normalised
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +274,12 @@ class Session:
     updated_at: datetime
     project_id: str = ""
     status: SessionStatus = "active"
+    # ADR-027 custody state — orthogonal to ``status`` (operational state).
+    # New sessions begin ``active``; transitions are policed by
+    # ``is_legal_lifecycle_transition`` and the cleanup job that owns TTL
+    # enforcement. ``closed`` and ``archived`` are terminal (no return to
+    # ``active`` — clone the history into a fresh session instead).
+    lifecycle_state: SessionLifecycleState = "active"
     thread_id: str | None = None
     title: str | None = None
     last_event_seq: int = 0

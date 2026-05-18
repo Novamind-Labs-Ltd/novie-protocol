@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
+from .contracts.agent_sdk_v2 import AgentManifestV2
 from .contracts import (
     AuditEvent,
     AuditEventKind,
@@ -28,10 +30,67 @@ from .contracts import (
     Session,
     SessionEvent,
     SessionEventsPage,
+    SessionLifecycleState,
     UsageDimension,
     UsageRecord,
     UsageSummary,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestRegistered:
+    agent_id: str
+    manifest: AgentManifestV2
+    source: str
+    healthy: bool = True
+    reason: str = ""
+    occurred_at: str = ""
+    revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestUpdated:
+    agent_id: str
+    manifest: AgentManifestV2
+    source: str
+    healthy: bool = True
+    reason: str = ""
+    occurred_at: str = ""
+    revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestRevoked:
+    agent_id: str
+    manifest: AgentManifestV2
+    source: str
+    healthy: bool = False
+    reason: str = ""
+    occurred_at: str = ""
+    revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestHealthChanged:
+    agent_id: str
+    manifest: AgentManifestV2
+    source: str
+    healthy: bool
+    reason: str = ""
+    occurred_at: str = ""
+    revision: int = 0
+
+
+ManifestRegistryEvent = (
+    ManifestRegistered
+    | ManifestUpdated
+    | ManifestRevoked
+    | ManifestHealthChanged
+)
+
+
+class ManifestRegistryListener(Protocol):
+    def on_manifest_event(self, event: ManifestRegistryEvent) -> None: ...
 
 
 class KnowledgeService(Protocol):
@@ -425,7 +484,11 @@ class SessionTimelineService(Protocol):
     """
 
     async def record(self, event: SessionEvent) -> SessionEvent:
-        """追加一条事件，分配 ``seq`` 后返回写入态对象。"""
+        """追加一条事件，分配 ``seq`` 后返回写入态对象。
+
+        Implementations must reject writes to unknown sessions unless the
+        event is the platform-owned ``session_created`` minting event.
+        """
         ...
 
     async def get_session(
@@ -453,6 +516,61 @@ class SessionTimelineService(Protocol):
         session_id: str,
         title: str,
     ) -> None: ...
+
+    async def transition_lifecycle(
+        self,
+        ctx: ExecutionContext,
+        session_id: str,
+        dst_state: SessionLifecycleState,
+        *,
+        reason: str = "",
+    ) -> Session | None:
+        """Transition a session's ADR-027 custody state.
+
+        Returns the post-transition ``Session`` or ``None`` if the session
+        is missing / outside the caller's tenant scope (mirrors
+        ``set_session_title`` no-op semantics). Raises ``ValueError`` on
+        illegal transitions per
+        ``novie_protocol.contracts.is_legal_lifecycle_transition`` — the
+        TTL cleanup job and admin tools are the only legitimate callers
+        of any transition into ``idle`` / ``archived``.
+
+        ``reason`` is recorded in audit / metrics so transition causes
+        (TTL sweep vs. admin override vs. user-initiated close) stay
+        attributable; implementations may persist it on a Session
+        metadata key.
+        """
+        ...
+
+    async def find_sessions_due_for_lifecycle_sweep(
+        self,
+        *,
+        now: datetime,
+        active_to_idle_after_seconds: int,
+        idle_to_archived_after_seconds: int,
+        closed_to_archived_after_seconds: int,
+        limit: int = 1000,
+    ) -> list[tuple[Session, SessionLifecycleState]]:
+        """Return ``(session, target_lifecycle_state)`` pairs that the
+        ADR-027 TTL cleanup job should transition.
+
+        Selection rules (driven by ``Session.updated_at``):
+
+        - ``active``   sessions older than ``active_to_idle_after_seconds``      → ``idle``
+        - ``idle``     sessions older than ``idle_to_archived_after_seconds``    → ``archived``
+        - ``closed``   sessions older than ``closed_to_archived_after_seconds``  → ``archived``
+
+        Platform-internal: this method intentionally does **not** filter
+        by tenant — the sweeper iterates across all tenants and rebuilds
+        a per-session ``ExecutionContext`` with a ``system:`` principal
+        before invoking ``transition_lifecycle``. Production callers
+        must guard the entry point to a platform-trusted scheduler.
+
+        ``limit`` caps the result set so PG-backed implementations can
+        page through large tables — the sweeper loops until it gets an
+        empty page.
+        """
+        ...
 
     async def list_events(
         self,
@@ -499,6 +617,24 @@ class OrchestrationEventStoreService(Protocol):
     async def get_latest_seq(self, ctx: ExecutionContext, plan_id: str) -> int: ...
 
 
+class ProviderCredentialService(Protocol):
+    """Tenant/workspace provider credential lookup boundary.
+
+    The concrete credential record intentionally stays implementation-defined:
+    platform runtimes may return an encrypted-store projection, an in-memory
+    reference object, or a short-lived lease wrapper. Callers must treat the
+    return value as opaque credential material for the requested provider.
+    """
+
+    async def get(
+        self,
+        *,
+        tenant_id: str,
+        workspace_id: str,
+        provider_id: str,
+    ) -> Any | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class PlatformServices:
     """Injected platform service bundle for agents (protocols only).
@@ -524,6 +660,7 @@ class PlatformServices:
     # Artifact index (PG-backed in production). Optional until wired by composition root.
     artifacts: ArtifactIndexReader | None = None
     external_agent_checkpoints: ExternalAgentCheckpointService | None = None
+    provider_credentials: ProviderCredentialService | None = None
 
     # Org-level LLM token pool & key-policy gate. Optional so existing
     # deployments keep working; when None, platform.llm.* calls are allowed
@@ -534,3 +671,25 @@ class PlatformServices:
     def knowledge(self) -> KnowledgeService:
         """Preferred semantic name for the independent Knowledge service boundary."""
         return self.wiki
+
+    async def fetch_credentials(
+        self,
+        *,
+        tenant_id: str,
+        provider_id: str,
+        workspace_id: str = "",
+    ) -> Any | None:
+        """Fetch tenant provider credentials through the platform boundary.
+
+        This is the ADR-028 facade surface. It deliberately does not cache:
+        provider runtimes wrap it with their own short in-process cache and
+        revocation invalidation policy.
+        """
+        store = self.provider_credentials
+        if store is None:
+            return None
+        return await store.get(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            provider_id=provider_id,
+        )

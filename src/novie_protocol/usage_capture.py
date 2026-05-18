@@ -163,7 +163,11 @@ class UsageCaptureCallback(AsyncCallbackHandler):
         )
         self._tool_call_count = 0
 
-        try:
-            await self._ledger.record(record)
-        except Exception:
-            pass
+        # ADR-025 W4 — the callback no longer swallows ledger failures.
+        # The platform composition root (``infra/usage/capture.py:make_usage_callback``)
+        # wraps the injected ``UsageLedgerService`` in a ``DurableUsageLedger``
+        # whose ``record()`` performs in-process retry + SQLite spill + drain
+        # and **never raises**. Callers that wire a raw ledger directly
+        # bypass durability — they are responsible for handling their own
+        # write failures.
+        await self._ledger.record(record)

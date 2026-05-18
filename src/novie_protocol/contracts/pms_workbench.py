@@ -158,14 +158,13 @@ class PmsIssue:
 class PmsIssueDraft:
     """Input for ``platform.pms.issue.create``.
 
-    Distinct from ``ticket_drafts.TicketDraft``:
-    - ``TicketDraft`` is splitter-output, set-scoped, with cross-draft
-      references (``blocked_by`` / ``depends_on`` by ``draft_key``).
-    - ``PmsIssueDraft`` is a single-issue create payload, addressed by real
-      PMS identifiers (``project_id``, ``parent_id``).
+    Distinct from ``work_item_graph.WorkItemDraft``: the splitter output is
+    graph-scoped and dependencies live on top-level ``WorkItemEdge`` values.
+    ``PmsIssueDraft`` is a single-issue create payload, addressed by real PMS
+    identifiers (``project_id``, ``parent_id``).
 
-    ``TicketDraftIngestionService`` is responsible for converting a
-    ``TicketDraftSet`` into a sequence of ``PmsIssueDraft`` writes.
+    ``WorkItemGraphIngestionService`` is responsible for materialising a
+    ``WorkItemDraftGraph`` into ``PmsIssueDraft`` writes.
     """
 
     project_id: str

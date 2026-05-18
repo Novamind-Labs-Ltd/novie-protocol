@@ -91,6 +91,61 @@ DecisionGateResolutionType = Literal[
 """
 
 
+# ── ADR-017 Block 4a/4b: mid-run ask timeout + per-step cap ────────────────
+
+MidRunAskTimeoutAction = Literal[
+    "skip",
+    "auto_recommended",
+    "fail_implementation",
+]
+"""What the platform should do when a mid-run decision gate times out.
+
+- ``skip``                  Treat the gate as ``skipped`` (existing behaviour).
+                            Runtime falls through with ``recommended_option``
+                            if present, else with agent-internal default.
+- ``auto_recommended``      Synthesise an ``auto_policy`` resolution using
+                            ``recommended_option``. Requires the envelope to
+                            carry a ``recommended_option``.
+- ``fail_implementation``   Fail the step with ``failure_type=implementation_failed``.
+                            High-risk gates that cannot proceed without a
+                            human answer use this so the dispatch
+                            classifier escalates rather than silently
+                            falling through.
+"""
+
+DEFAULT_MAX_MID_RUN_ASKS_PER_STEP = 3
+"""ADR-017 default cap on the number of mid-run decision gates a single
+step can raise. Exceeding the cap escalates the step to ``re-plan`` or
+``implementation_failed`` per platform policy; the cap can be tightened
+per capability via ``capability_metadata.max_mid_run_asks`` or per tenant
+via tenant-policy ``max_mid_run_asks``.
+
+Both 4a (envelope-declared ``timeout_seconds`` / ``default_action_on_timeout``)
+and 4b (per-step cap) are the protocol-side primitives. Platform
+middleware reads the envelope + counter and enforces; the wiring
+itself is a follow-up slice once the consumer-side semantics
+stabilise."""
+
+
+def check_mid_run_ask_budget(
+    current_count: int,
+    *,
+    cap: int = DEFAULT_MAX_MID_RUN_ASKS_PER_STEP,
+) -> bool:
+    """ADR-017 Block 4b — return ``True`` iff another mid-run ask is
+    allowed for this step.
+
+    Mirrors :func:`has_snapshot_patch_budget` (ADR-018) shape: callers
+    pass the current count of asks already raised on this step; the
+    function reports whether the *next* one would exceed the cap.
+
+    ``current_count`` is what the platform has already counted, *not*
+    what the next ask would bring the total to. The caller increments
+    AFTER the check (and only if the check passed).
+    """
+    return max(0, current_count) < max(0, cap)
+
+
 # Canonical gate_type values for the analyst W4 taxonomy. ``gate_type`` on
 # the envelope is an open string so non-analyst experts can introduce
 # their own values without modifying this contract; this tuple is exposed
@@ -216,6 +271,13 @@ class DecisionGateEnvelope:
     raised_by_agent_id: str = ""
     raised_at_phase: str = ""
     raised_at_ms: int | None = None
+    # ADR-017 Block 4a — agent-declared timeout + default action.
+    # ``timeout_seconds=None`` means "use platform default" (tenant
+    # policy can fill this in). ``default_action_on_timeout="skip"``
+    # preserves the pre-ADR-017 behaviour, so existing producers stay
+    # unchanged by default.
+    timeout_seconds: float | None = None
+    default_action_on_timeout: MidRunAskTimeoutAction = "skip"
 
     def __post_init__(self) -> None:
         # Reserialisation safety: tuples may arrive as lists from JSON.
@@ -256,6 +318,21 @@ class DecisionGateEnvelope:
                     f"recommended_option={self.recommended_option!r} does "
                     f"not match any option.id in {sorted(option_ids)!r}"
                 )
+        # ADR-017 Block 4a — validate timeout + default_action consistency.
+        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
+            raise ValueError(
+                f"DecisionGateEnvelope.timeout_seconds must be positive when "
+                f"set; got {self.timeout_seconds!r}"
+            )
+        if (
+            self.default_action_on_timeout == "auto_recommended"
+            and self.recommended_option is None
+        ):
+            raise ValueError(
+                "DecisionGateEnvelope.default_action_on_timeout='auto_recommended' "
+                "requires recommended_option so the platform has a default to "
+                "synthesise on timeout"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +440,7 @@ class DecisionGateRuntimeState:
 
 __all__ = [
     "ANALYST_DECISION_GATE_TYPES",
+    "DEFAULT_MAX_MID_RUN_ASKS_PER_STEP",
     "DecisionGateEnvelope",
     "DecisionGateOption",
     "DecisionGateResolution",
@@ -370,4 +448,6 @@ __all__ = [
     "DecisionGateRiskLevel",
     "DecisionGateRuntimeState",
     "DecisionGateRuntimeStatus",
+    "MidRunAskTimeoutAction",
+    "check_mid_run_ask_budget",
 ]

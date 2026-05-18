@@ -26,6 +26,35 @@ ExecutionFailureType = Literal[
     "cancelled",
 ]
 
+EXECUTION_FAILURE_TYPES: tuple[str, ...] = (
+    "transient",
+    "delivery_blocked",
+    "implementation_failed",
+    "cancelled",
+)
+
+ExecutionFailureReasonCode = Literal[
+    "transient.llm_rate_limit",
+    "transient.upstream_timeout",
+    "delivery_blocked.quota_exhausted",
+    "delivery_blocked.policy_gate_rejected",
+    "delivery_blocked.dependency_deadlock",
+    "implementation_failed.agent_error",
+    "implementation_failed.schema_violation",
+    "cancelled.user_cancelled",
+]
+
+EXECUTION_FAILURE_REASON_CODES: tuple[str, ...] = (
+    "transient.llm_rate_limit",
+    "transient.upstream_timeout",
+    "delivery_blocked.quota_exhausted",
+    "delivery_blocked.policy_gate_rejected",
+    "delivery_blocked.dependency_deadlock",
+    "implementation_failed.agent_error",
+    "implementation_failed.schema_violation",
+    "cancelled.user_cancelled",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionFailureRecord:
@@ -41,7 +70,7 @@ class ExecutionFailureRecord:
     workflow_id: str
     workflow_run_id: str
     failure_type: ExecutionFailureType
-    reason_code: str = ""
+    reason_code: ExecutionFailureReasonCode
     failure_summary: str = ""
     last_agent_id: str = ""
     last_step_id: str = ""
@@ -53,6 +82,10 @@ class ExecutionFailureRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not str(self.reason_code).strip():
+            raise ValueError("ExecutionFailureRecord.reason_code must be non-empty")
+        if self.reason_code not in EXECUTION_FAILURE_REASON_CODES:
+            raise ValueError(f"unsupported ExecutionFailureRecord.reason_code {self.reason_code!r}")
         for name in ("artifact_refs", "log_refs"):
             value = getattr(self, name)
             if not isinstance(value, tuple):

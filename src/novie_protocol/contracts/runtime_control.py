@@ -224,6 +224,8 @@ class RuntimeTrigger:
     created_at: datetime | None = None
     claimed_at: datetime | None = None
     dispatched_at: datetime | None = None
+    delivered_at: datetime | None = None
+    abandoned_at: datetime | None = None
     run_id: str = ""              # RuntimeRun created from this trigger
 
 

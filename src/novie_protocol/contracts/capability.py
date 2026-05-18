@@ -43,6 +43,16 @@ CapabilityCallerMode = Literal["interactive", "preview", "execute", "delegated"]
 CapabilityInvokeMode = Literal["execute", "dry_run", "plan_eval"]
 CapabilityInvokeStatus = Literal["ok", "needs_confirmation", "denied", "error"]
 CapabilitySchemaCompat = Literal["compatible", "breaking", "unknown"]
+SnapshotPatchTriggerSource = Literal[
+    "provider_version_bump",
+    "quota_refill",
+    "manifest_patch_update",
+    "equivalent_provider_swap",
+    "delivery_blocked",
+    "manual",
+    "registry_drift",
+]
+SnapshotPatchDecision = Literal["auto_patch", "human_review", "replan"]
 CapabilityMiddlewareStep = Literal[
     "auth",
     "policy",
@@ -55,6 +65,18 @@ CapabilityMiddlewareStep = Literal[
     "response",
 ]
 CapabilityMiddlewareStatus = Literal["pending", "ok", "skipped", "denied", "error"]
+CapabilityManifestKind = Literal["capability", "provider"]
+
+DEFAULT_AUTO_SNAPSHOT_PATCH_CAP = 2
+
+
+def has_snapshot_patch_budget(
+    previous_attempts: int,
+    *,
+    cap: int = DEFAULT_AUTO_SNAPSHOT_PATCH_CAP,
+) -> bool:
+    """Whether another automatic snapshot patch may be attempted."""
+    return max(0, previous_attempts) < max(0, cap)
 
 # ── Capability governance schema (W1 of capability-contract orchestration) ──
 #
@@ -91,6 +113,8 @@ which is what governance and auditing care about.
   email, deployment, etc.).
 """
 
+CapabilityGovernanceRiskTier = Literal["low", "medium", "high", "dangerous"]
+
 
 @dataclass(frozen=True, slots=True)
 class CapabilityGovernance:
@@ -114,7 +138,7 @@ class CapabilityGovernance:
     requires_tracker_issue: bool = False
     """Execution may only begin from a runnable tracker issue (a
     materialised PMS ticket transitioned to Todo). The compiler inserts
-    the ``ticket_drafts -> tracker_ingestion -> tracker_issue`` chain
+    the ``work_item_draft_graph -> tracker_ingestion -> tracker_issue`` chain
     upstream when needed; runtime denies execution if no issue is bound."""
 
     requires_human_gate: bool = False
@@ -122,11 +146,28 @@ class CapabilityGovernance:
     Distinct from ``requires_plan_review``: this gates *runtime* not
     plan approval."""
 
+    risk_tier: CapabilityGovernanceRiskTier = "low"
+    mutates_external_state: bool = False
+    produces_artifact: bool = False
+    long_running: bool = False
+    requires_workspace_mount: bool = False
+    requires_durable_checkpoint: bool = False
+    streams_intermediate_artifacts: bool = False
+    self_managed_checkpoint: bool = False
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "requires_plan_review": self.requires_plan_review,
             "requires_tracker_issue": self.requires_tracker_issue,
             "requires_human_gate": self.requires_human_gate,
+            "risk_tier": self.risk_tier,
+            "mutates_external_state": self.mutates_external_state,
+            "produces_artifact": self.produces_artifact,
+            "long_running": self.long_running,
+            "requires_workspace_mount": self.requires_workspace_mount,
+            "requires_durable_checkpoint": self.requires_durable_checkpoint,
+            "streams_intermediate_artifacts": self.streams_intermediate_artifacts,
+            "self_managed_checkpoint": self.self_managed_checkpoint,
         }
 
     @classmethod
@@ -137,6 +178,16 @@ class CapabilityGovernance:
             requires_plan_review=bool(data.get("requires_plan_review", False)),
             requires_tracker_issue=bool(data.get("requires_tracker_issue", False)),
             requires_human_gate=bool(data.get("requires_human_gate", False)),
+            risk_tier=data.get("risk_tier", "low"),
+            mutates_external_state=bool(data.get("mutates_external_state", False)),
+            produces_artifact=bool(data.get("produces_artifact", False)),
+            long_running=bool(data.get("long_running", False)),
+            requires_workspace_mount=bool(data.get("requires_workspace_mount", False)),
+            requires_durable_checkpoint=bool(data.get("requires_durable_checkpoint", False)),
+            streams_intermediate_artifacts=bool(
+                data.get("streams_intermediate_artifacts", False)
+            ),
+            self_managed_checkpoint=bool(data.get("self_managed_checkpoint", False)),
         )
 
 
@@ -187,6 +238,46 @@ CAPABILITY_ERROR_CODES: tuple[str, ...] = (
 
 
 @dataclass(frozen=True, slots=True)
+class ServedAction:
+    resource_type: str
+    verb: str
+    aliases: tuple[str, ...] = ()
+    description: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.aliases, tuple):
+            object.__setattr__(self, "aliases", tuple(self.aliases))
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "resource_type": self.resource_type,
+            "verb": self.verb,
+            "aliases": list(self.aliases),
+        }
+        if self.description:
+            out["description"] = self.description
+        return out
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | str) -> ServedAction:
+        if isinstance(data, str):
+            resource_type, _, verb = data.partition(".")
+            if not verb:
+                verb = resource_type
+                resource_type = ""
+            return cls(resource_type=resource_type, verb=verb)
+        aliases = data.get("aliases") or ()
+        if isinstance(aliases, str):
+            aliases = (aliases,)
+        return cls(
+            resource_type=str(data.get("resource_type") or ""),
+            verb=str(data.get("verb") or ""),
+            aliases=tuple(str(item) for item in aliases),
+            description=str(data.get("description") or ""),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AgentCapabilityManifestEntry:
     """Structured capability declaration published by an agent manifest.
 
@@ -205,6 +296,7 @@ class AgentCapabilityManifestEntry:
     side_effect: CapabilitySideEffect
     exec_kind: CapabilityExecKind
     runtime_ref: str
+    manifest_kind: CapabilityManifestKind = "capability"
     tags: tuple[str, ...] = ()
     natural_language_aliases: tuple[str, ...] = ()
     examples: tuple[dict[str, Any], ...] = ()
@@ -219,10 +311,13 @@ class AgentCapabilityManifestEntry:
     conflicts: tuple[str, ...] = ()
     provides: tuple[str, ...] = ()
     consumes: tuple[str, ...] = ()
+    serves_actions: tuple[ServedAction, ...] = ()
     execution_lane: CapabilityExecutionLane = "direct"
     risk_class: CapabilityRiskClass = "read_only"
     governance: CapabilityGovernance = field(default_factory=CapabilityGovernance)
     metadata: dict[str, Any] = field(default_factory=dict)
+    canonical_id: str | None = None
+    legacy_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -233,13 +328,26 @@ class AgentCapabilityManifestEntry:
             "conflicts",
             "provides",
             "consumes",
+            "serves_actions",
         ):
             value = getattr(self, name)
             if not isinstance(value, tuple):
                 object.__setattr__(self, name, tuple(value))
+        object.__setattr__(
+            self,
+            "serves_actions",
+            tuple(
+                item if isinstance(item, ServedAction) else ServedAction.from_dict(item)
+                for item in self.serves_actions
+            ),
+        )
+        if isinstance(self.canonical_id, str) and not self.canonical_id.strip():
+            object.__setattr__(self, "canonical_id", None)
+        if isinstance(self.legacy_id, str) and not self.legacy_id.strip():
+            object.__setattr__(self, "legacy_id", None)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "capability_id": self.capability_id,
             "version": self.version,
             "display_name": self.display_name,
@@ -250,6 +358,7 @@ class AgentCapabilityManifestEntry:
             "side_effect": self.side_effect,
             "exec_kind": self.exec_kind,
             "runtime_ref": self.runtime_ref,
+            "manifest_kind": self.manifest_kind,
             "tags": list(self.tags),
             "natural_language_aliases": list(self.natural_language_aliases),
             "examples": [dict(item) for item in self.examples],
@@ -264,14 +373,24 @@ class AgentCapabilityManifestEntry:
             "conflicts": list(self.conflicts),
             "provides": list(self.provides),
             "consumes": list(self.consumes),
+            "serves_actions": [item.to_dict() for item in self.serves_actions],
             "execution_lane": self.execution_lane,
             "risk_class": self.risk_class,
             "governance": self.governance.to_dict(),
             "metadata": dict(self.metadata),
         }
+        if self.canonical_id:
+            data["canonical_id"] = self.canonical_id
+        if self.legacy_id:
+            data["legacy_id"] = self.legacy_id
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentCapabilityManifestEntry:
+        metadata = dict(data.get("metadata") or {})
+        serves_actions_raw = data.get("serves_actions")
+        if serves_actions_raw is None:
+            serves_actions_raw = metadata.get("serves_actions") or ()
         return cls(
             capability_id=str(data["capability_id"]),
             version=str(data["version"]),
@@ -283,6 +402,7 @@ class AgentCapabilityManifestEntry:
             side_effect=data["side_effect"],
             exec_kind=data["exec_kind"],
             runtime_ref=str(data.get("runtime_ref") or ""),
+            manifest_kind=_manifest_kind_from_dict(data),
             tags=tuple(data.get("tags") or ()),
             natural_language_aliases=tuple(data.get("natural_language_aliases") or ()),
             examples=tuple(dict(item) for item in data.get("examples") or ()),
@@ -297,11 +417,32 @@ class AgentCapabilityManifestEntry:
             conflicts=tuple(data.get("conflicts") or ()),
             provides=tuple(data.get("provides") or ()),
             consumes=tuple(data.get("consumes") or ()),
+            serves_actions=tuple(
+                ServedAction.from_dict(item)
+                for item in (serves_actions_raw or ())
+            ),
             execution_lane=data.get("execution_lane", "direct"),
             risk_class=data.get("risk_class", "read_only"),
             governance=CapabilityGovernance.from_dict(data.get("governance")),
-            metadata=dict(data.get("metadata") or {}),
+            metadata=metadata,
+            canonical_id=(
+                str(data.get("canonical_id"))
+                if data.get("canonical_id") not in (None, "")
+                else None
+            ),
+            legacy_id=(
+                str(data.get("legacy_id"))
+                if data.get("legacy_id") not in (None, "")
+                else None
+            ),
         )
+
+
+def _manifest_kind_from_dict(data: dict[str, Any]) -> CapabilityManifestKind:
+    value = data.get("manifest_kind")
+    if value is None and data.get("kind") in ("capability", "provider"):
+        value = data.get("kind")
+    return value or "capability"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1107,6 +1248,124 @@ class CapabilityPlanNodeDraft:
         )
 
 
+CapabilitySelectionSource = Literal[
+    "llm_rank",
+    "single_candidate_short_circuit",
+    "manual",
+    "policy_rewrite",
+    "patch_replay",
+    "unspecified",
+]
+"""Closed set of provenance markers for ``CapabilitySelectionRationale.source``.
+
+ADR-012 audit needs to distinguish how a capability was picked so the
+replay path can decide whether to re-run the LLM (``llm_rank`` /
+``single_candidate_short_circuit``) or trust a deterministic upstream
+decision (``manual`` / ``policy_rewrite`` / ``patch_replay``)."""
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityCandidateScore:
+    """One candidate the picker considered for a single step.
+
+    ADR-012 audit replays "why this capability won" by storing every
+    alternative the LLM saw alongside the chosen winner. Score is
+    optional because the picker is LLM-driven — when ranks are
+    qualitative (no numeric score), the ``notes`` field carries the
+    LLM's reasoning instead.
+    """
+
+    capability_id: str
+    agent_id: str = ""
+    score: float | None = None
+    risk_class: str = ""
+    side_effect: str = ""
+    notes: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capability_id": self.capability_id,
+            "agent_id": self.agent_id,
+            "score": self.score,
+            "risk_class": self.risk_class,
+            "side_effect": self.side_effect,
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityCandidateScore:
+        score_raw = data.get("score")
+        score: float | None
+        if score_raw is None:
+            score = None
+        else:
+            try:
+                score = float(score_raw)
+            except (TypeError, ValueError):
+                score = None
+        return cls(
+            capability_id=str(data.get("capability_id") or ""),
+            agent_id=str(data.get("agent_id") or ""),
+            score=score,
+            risk_class=str(data.get("risk_class") or ""),
+            side_effect=str(data.get("side_effect") or ""),
+            notes=str(data.get("notes") or ""),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilitySelectionRationale:
+    """ADR-012 LLM-rank rationale pinned per ``CapabilityResolution``.
+
+    Captures the picker's per-step explanation + the candidate score
+    table at plan-approve time so audit can replay the routing decision
+    without re-running the LLM. Empty default values keep legacy
+    snapshots deserialisable.
+    """
+
+    source: CapabilitySelectionSource = "unspecified"
+    rationale_text: str = ""
+    candidate_scores: tuple[CapabilityCandidateScore, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidate_scores, tuple):
+            object.__setattr__(
+                self, "candidate_scores", tuple(self.candidate_scores)
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source": self.source,
+            "rationale_text": self.rationale_text,
+            "candidate_scores": [c.to_dict() for c in self.candidate_scores],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilitySelectionRationale:
+        raw_source = str(data.get("source") or "unspecified")
+        source: CapabilitySelectionSource = (
+            raw_source  # type: ignore[assignment]
+            if raw_source
+            in (
+                "llm_rank",
+                "single_candidate_short_circuit",
+                "manual",
+                "policy_rewrite",
+                "patch_replay",
+                "unspecified",
+            )
+            else "unspecified"
+        )
+        return cls(
+            source=source,
+            rationale_text=str(data.get("rationale_text") or ""),
+            candidate_scores=tuple(
+                CapabilityCandidateScore.from_dict(dict(item))
+                for item in data.get("candidate_scores", ())
+            ),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityResolution:
     """A frozen capability binding chosen for one approved plan node."""
@@ -1118,9 +1377,14 @@ class CapabilityResolution:
     resolved_binding_id: str | None = None
     resolved_credential_ref: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # ADR-012 — picker rationale captured at plan-approve time. ``None``
+    # for legacy resolutions or resolutions where rationale was not
+    # surfaced; serialisation drops the field when ``None`` to keep
+    # round-trip shape backwards compatible with pre-ADR-012 snapshots.
+    selection_rationale: CapabilitySelectionRationale | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "node_id": self.node_id,
             "required_capability": self.required_capability,
             "resolved_runtime_ref": self.resolved_runtime_ref,
@@ -1129,9 +1393,16 @@ class CapabilityResolution:
             "resolved_credential_ref": self.resolved_credential_ref,
             "metadata": dict(self.metadata),
         }
+        if self.selection_rationale is not None:
+            payload["selection_rationale"] = self.selection_rationale.to_dict()
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CapabilityResolution:
+        rationale_raw = data.get("selection_rationale")
+        rationale: CapabilitySelectionRationale | None = None
+        if isinstance(rationale_raw, dict):
+            rationale = CapabilitySelectionRationale.from_dict(rationale_raw)
         return cls(
             node_id=str(data["node_id"]),
             required_capability=str(data["required_capability"]),
@@ -1140,6 +1411,7 @@ class CapabilityResolution:
             resolved_binding_id=data.get("resolved_binding_id"),
             resolved_credential_ref=data.get("resolved_credential_ref"),
             metadata=dict(data.get("metadata") or {}),
+            selection_rationale=rationale,
         )
 
 
@@ -1183,6 +1455,68 @@ class CapabilityDriftReportItem:
 
 
 @dataclass(frozen=True, slots=True)
+class CapabilityResolutionSnapshotPatch:
+    """Append-only record describing why a resolution snapshot version changed."""
+
+    patch_id: str
+    plan_id: str
+    from_snapshot_version: str
+    to_snapshot_version: str
+    trigger_source: SnapshotPatchTriggerSource
+    decision: SnapshotPatchDecision
+    reason: str
+    patch_attempt: int = 1
+    affected_step_ids: tuple[str, ...] = ()
+    drift_items: tuple[CapabilityDriftReportItem, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.affected_step_ids, tuple):
+            object.__setattr__(
+                self,
+                "affected_step_ids",
+                tuple(self.affected_step_ids),
+            )
+        if not isinstance(self.drift_items, tuple):
+            object.__setattr__(self, "drift_items", tuple(self.drift_items))
+        object.__setattr__(self, "patch_attempt", max(1, int(self.patch_attempt)))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "patch_id": self.patch_id,
+            "plan_id": self.plan_id,
+            "from_snapshot_version": self.from_snapshot_version,
+            "to_snapshot_version": self.to_snapshot_version,
+            "trigger_source": self.trigger_source,
+            "decision": self.decision,
+            "reason": self.reason,
+            "patch_attempt": self.patch_attempt,
+            "affected_step_ids": list(self.affected_step_ids),
+            "drift_items": [item.to_dict() for item in self.drift_items],
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityResolutionSnapshotPatch:
+        return cls(
+            patch_id=str(data["patch_id"]),
+            plan_id=str(data["plan_id"]),
+            from_snapshot_version=str(data["from_snapshot_version"]),
+            to_snapshot_version=str(data["to_snapshot_version"]),
+            trigger_source=data["trigger_source"],
+            decision=data["decision"],
+            reason=str(data.get("reason") or ""),
+            patch_attempt=int(data.get("patch_attempt") or 1),
+            affected_step_ids=tuple(data.get("affected_step_ids") or ()),
+            drift_items=tuple(
+                CapabilityDriftReportItem.from_dict(dict(item))
+                for item in data.get("drift_items", ())
+            ),
+            metadata=dict(data.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CapabilityResolutionSnapshot:
     """Capability resolutions frozen when a plan is approved."""
 
@@ -1190,11 +1524,15 @@ class CapabilityResolutionSnapshot:
     frozen_at: str
     resolutions: tuple[CapabilityResolution, ...]
     runtime_context_snapshot_ref: str | None = None
+    snapshot_version: str = "v1"
+    predecessor_snapshot_version: str | None = None
+    patch_attempt: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.resolutions, tuple):
             object.__setattr__(self, "resolutions", tuple(self.resolutions))
+        object.__setattr__(self, "patch_attempt", max(0, int(self.patch_attempt)))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1202,6 +1540,9 @@ class CapabilityResolutionSnapshot:
             "frozen_at": self.frozen_at,
             "resolutions": [item.to_dict() for item in self.resolutions],
             "runtime_context_snapshot_ref": self.runtime_context_snapshot_ref,
+            "snapshot_version": self.snapshot_version,
+            "predecessor_snapshot_version": self.predecessor_snapshot_version,
+            "patch_attempt": self.patch_attempt,
             "metadata": dict(self.metadata),
         }
 
@@ -1215,6 +1556,9 @@ class CapabilityResolutionSnapshot:
                 for item in data.get("resolutions", ())
             ),
             runtime_context_snapshot_ref=data.get("runtime_context_snapshot_ref"),
+            snapshot_version=str(data.get("snapshot_version") or "v1"),
+            predecessor_snapshot_version=data.get("predecessor_snapshot_version"),
+            patch_attempt=int(data.get("patch_attempt") or 0),
             metadata=dict(data.get("metadata") or {}),
         )
 

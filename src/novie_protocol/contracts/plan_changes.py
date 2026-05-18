@@ -40,6 +40,74 @@ PlanChangeType = Literal[
 ]
 
 RiskLevel = Literal["low", "medium", "high", "critical"]
+PlanReplanTriggerSource = Literal[
+    "auto_patch_exhausted",
+    "user_initiated",
+    "reception_turn",
+]
+DEFAULT_AUTO_REPLAN_CAP = 2
+
+
+def has_auto_replan_budget(
+    previous_attempts: int,
+    *,
+    cap: int = DEFAULT_AUTO_REPLAN_CAP,
+) -> bool:
+    """Whether another automatic re-plan may be attempted for the plan."""
+    return max(0, previous_attempts) < max(0, cap)
+
+
+@dataclass(frozen=True, slots=True)
+class PlanReplannedEvent:
+    """Audit/dispatch payload emitted when a plan version is replaced."""
+
+    plan_id: str
+    old_plan_version: str
+    new_plan_version: str
+    trigger_source: PlanReplanTriggerSource
+    reason: str
+    preserved_step_ids: tuple[str, ...] = ()
+    replaced_step_ids: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.preserved_step_ids, tuple):
+            object.__setattr__(
+                self,
+                "preserved_step_ids",
+                tuple(self.preserved_step_ids),
+            )
+        if not isinstance(self.replaced_step_ids, tuple):
+            object.__setattr__(
+                self,
+                "replaced_step_ids",
+                tuple(self.replaced_step_ids),
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "old_plan_version": self.old_plan_version,
+            "new_plan_version": self.new_plan_version,
+            "trigger_source": self.trigger_source,
+            "reason": self.reason,
+            "preserved_step_ids": list(self.preserved_step_ids),
+            "replaced_step_ids": list(self.replaced_step_ids),
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PlanReplannedEvent:
+        return cls(
+            plan_id=str(data["plan_id"]),
+            old_plan_version=str(data["old_plan_version"]),
+            new_plan_version=str(data["new_plan_version"]),
+            trigger_source=data["trigger_source"],
+            reason=str(data.get("reason") or ""),
+            preserved_step_ids=tuple(data.get("preserved_step_ids") or ()),
+            replaced_step_ids=tuple(data.get("replaced_step_ids") or ()),
+            metadata=dict(data.get("metadata") or {}),
+        )
 
 # ---------------------------------------------------------------------------
 # PlanPatchOperation —— 原子变更操作

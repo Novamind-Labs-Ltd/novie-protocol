@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+PlanGraphMode = Literal["direct_only", "staged_only", "mixed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +17,7 @@ class TaskBrief:
     title: str
     summary: str
     user_goal: str
+    routing_hint: PlanGraphMode | None = None
     constraints: tuple[str, ...] = ()
     attachments: tuple[str, ...] = ()
     raw_metadata: dict[str, Any] = field(default_factory=dict)
