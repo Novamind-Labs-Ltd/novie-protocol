@@ -66,6 +66,12 @@ CapabilityMiddlewareStep = Literal[
 ]
 CapabilityMiddlewareStatus = Literal["pending", "ok", "skipped", "denied", "error"]
 CapabilityManifestKind = Literal["capability", "provider"]
+CapabilityInputSource = Literal[
+    "user_input",
+    "upstream_capability",
+    "runtime_context",
+    "platform_projection",
+]
 
 DEFAULT_AUTO_SNAPSHOT_PATCH_CAP = 2
 
@@ -278,6 +284,42 @@ class ServedAction:
 
 
 @dataclass(frozen=True, slots=True)
+class CapabilityInputContract:
+    """Typed source declaration for one consumed artifact.
+
+    ``consumes`` names the artifact dependency. ``input_contracts`` explains
+    who is allowed to satisfy it, so the platform can validate routability
+    without guessing from artifact names.
+    """
+
+    artifact: str
+    source: CapabilityInputSource = "upstream_capability"
+    provider: str = ""
+    required: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "artifact": self.artifact,
+            "source": self.source,
+            "required": self.required,
+        }
+        if self.provider:
+            out["provider"] = self.provider
+        return out
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | str) -> CapabilityInputContract:
+        if isinstance(data, str):
+            return cls(artifact=data)
+        return cls(
+            artifact=str(data.get("artifact") or ""),
+            source=data.get("source", "upstream_capability"),
+            provider=str(data.get("provider") or ""),
+            required=bool(data.get("required", True)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AgentCapabilityManifestEntry:
     """Structured capability declaration published by an agent manifest.
 
@@ -311,6 +353,8 @@ class AgentCapabilityManifestEntry:
     conflicts: tuple[str, ...] = ()
     provides: tuple[str, ...] = ()
     consumes: tuple[str, ...] = ()
+    input_contracts: tuple[CapabilityInputContract, ...] = ()
+    caller_types: tuple[CapabilityCallerType, ...] = ()
     serves_actions: tuple[ServedAction, ...] = ()
     execution_lane: CapabilityExecutionLane = "direct"
     risk_class: CapabilityRiskClass = "read_only"
@@ -328,11 +372,23 @@ class AgentCapabilityManifestEntry:
             "conflicts",
             "provides",
             "consumes",
+            "input_contracts",
+            "caller_types",
             "serves_actions",
         ):
             value = getattr(self, name)
             if not isinstance(value, tuple):
                 object.__setattr__(self, name, tuple(value))
+        object.__setattr__(
+            self,
+            "input_contracts",
+            tuple(
+                item
+                if isinstance(item, CapabilityInputContract)
+                else CapabilityInputContract.from_dict(item)
+                for item in self.input_contracts
+            ),
+        )
         object.__setattr__(
             self,
             "serves_actions",
@@ -373,6 +429,8 @@ class AgentCapabilityManifestEntry:
             "conflicts": list(self.conflicts),
             "provides": list(self.provides),
             "consumes": list(self.consumes),
+            "input_contracts": [item.to_dict() for item in self.input_contracts],
+            "caller_types": list(self.caller_types),
             "serves_actions": [item.to_dict() for item in self.serves_actions],
             "execution_lane": self.execution_lane,
             "risk_class": self.risk_class,
@@ -417,6 +475,11 @@ class AgentCapabilityManifestEntry:
             conflicts=tuple(data.get("conflicts") or ()),
             provides=tuple(data.get("provides") or ()),
             consumes=tuple(data.get("consumes") or ()),
+            input_contracts=tuple(
+                CapabilityInputContract.from_dict(item)
+                for item in (data.get("input_contracts") or ())
+            ),
+            caller_types=tuple(data.get("caller_types") or ()),
             serves_actions=tuple(
                 ServedAction.from_dict(item)
                 for item in (serves_actions_raw or ())
