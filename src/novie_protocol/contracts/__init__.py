@@ -145,6 +145,7 @@ from .failure_taxonomy import (
     ExecutionFailureType,
 )
 from .gates import EXECUTION_GATE_ACTIONS, REVIEW_GATE_ACTIONS, GateSpec
+from .handoff import HandoffEnvelope
 from .member import (
     MemberApprovalContext,
     MemberContextClient,
@@ -568,6 +569,7 @@ __all__ = [
     "GateSpec",
     "GovernanceDecision",
     "GovernanceDecisionAction",
+    "HandoffEnvelope",
     "IdentityContext",
     "Intent",
     "IterationContext",
