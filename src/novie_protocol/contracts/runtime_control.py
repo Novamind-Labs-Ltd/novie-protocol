@@ -36,11 +36,17 @@ RunKind = Literal[
 
 RunStatus = Literal[
     "created",
+    "pending",
+    "planning",
+    "compiled",
     "running",
+    "gate_pending",
+    "finalizing",
     "waiting_human",
     "completed",
     "failed",
     "cancelled",
+    "timed_out",
 ]
 
 
@@ -80,12 +86,17 @@ class RuntimeRun:
 
 StepStatus = Literal[
     "pending",
+    "ready",
     "running",
+    "gate_pending",
     "waiting_human",
+    "output_available",
+    "finalizing",
     "completed",
     "failed",
     "skipped",
     "cancelled",
+    "timed_out",
 ]
 
 
