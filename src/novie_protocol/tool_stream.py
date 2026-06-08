@@ -144,7 +144,13 @@ class ToolStreamAccumulator:
                 tool_name=name,
                 tool_call_id=tcid or None,
                 tool_result=_truncate(content, self._tool_result_max),
-                metadata=dict(self._default_meta),
+                metadata={
+                    **dict(self._default_meta),
+                    "event": "tool_result",
+                    "visibility": "internal",
+                    "tool_result_visibility": "internal",
+                    "tool_result_chars": len(content),
+                },
             )
 
     def _consume_tool_call_chunks(
