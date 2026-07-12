@@ -33,6 +33,8 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from .session import SessionEvent
 
+from .run_correlation import RunCorrelation
+
 WorkflowStreamEventKind = Literal[
     "run_status",
     "step_status",
@@ -106,6 +108,7 @@ class WorkflowStreamEvent:
 
     tenant_id: str = ""
     workspace_id: str = ""
+    run_correlation: RunCorrelation | None = None
 
     payload: dict[str, Any] = field(default_factory=dict)
     """Kind-specific structured data. Sub-schema by kind:
@@ -296,6 +299,7 @@ def project_workflow_stream_event(
         step_id=step_id or None,
         tenant_id=event.tenant_id,
         workspace_id=event.workspace_id,
+        run_correlation=event.correlation,
         payload=dict(payload),
         metadata=safe_metadata,
     )

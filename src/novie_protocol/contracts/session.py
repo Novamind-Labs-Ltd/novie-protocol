@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from .context import ExecutionContext
+from .run_correlation import RunCorrelation
 
 SessionEventSource = Literal[
     "chat", "planning", "dispatch", "gate", "callback", "system",
@@ -306,6 +307,7 @@ class SessionEvent:
     workspace_id: str = ""
     project_id: str = ""
     thread_id: str | None = None
+    correlation: RunCorrelation | None = None
     payload: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -336,6 +338,7 @@ def new_session_event(
         workspace_id=ctx.tenant.workspace_id,
         project_id=ctx.tenant.project_id or ctx.tenant.workspace_id,
         thread_id=ctx.thread_id,
+        correlation=ctx.correlation,
         payload=dict(payload or {}),
         metadata=dict(metadata or {}),
     )

@@ -101,6 +101,7 @@ from .change_events import (
     new_change_event,
 )
 from .context import ExecutionContext, IdentityContext, TenantScope, TrustedHeaders
+from .run_correlation import RunCorrelation
 from .decision_gate import (
     ANALYST_DECISION_GATE_TYPES,
     DEFAULT_MAX_MID_RUN_ASKS_PER_STEP,
@@ -652,6 +653,7 @@ __all__ = [
     "ProjectRuntimeContext",
     "RunLivenessCase",
     "RunLivenessSnapshot",
+    "RunCorrelation",
     "QuotaAction",
     "QuotaDecision",
     "QuotaMetric",

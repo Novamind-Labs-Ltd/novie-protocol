@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .run_correlation import RunCorrelation
+
 
 @dataclass(frozen=True, slots=True)
 class TenantScope:
@@ -89,6 +91,7 @@ class ExecutionContext:
     identity: IdentityContext
     workflow_id: str | None = None
     parent_step_id: str | None = None
+    correlation: RunCorrelation | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def fork(self, new_thread_id: str, forked_from_checkpoint_id: str) -> ExecutionContext:
@@ -104,6 +107,7 @@ class ExecutionContext:
             identity=self.identity,
             workflow_id=self.workflow_id,
             parent_step_id=self.parent_step_id,
+            correlation=self.correlation,
             metadata={
                 **self.metadata,
                 "parent_thread_id": self.thread_id,

@@ -26,6 +26,7 @@ from typing import Any, Literal
 
 from .capability import CapabilityErrorCode
 from .resource import ResourceRef
+from .run_correlation import RunCorrelation
 
 
 InvocationMode = Literal["dry_run", "execute", "plan_eval"]
@@ -157,6 +158,7 @@ class CapabilityInvocationRequest:
     """Resource references the capability consumes / produces. The
     invocation middleware re-authorises each ref via the W3 graph."""
     correlation: CorrelationIds = field(default_factory=CorrelationIds)
+    run_correlation: RunCorrelation | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     """Free-form caller hints (UI selection state, planner
     re-planning context, etc.). Never carries secrets — credentials
@@ -296,6 +298,7 @@ class CapabilityInvocationResult:
     middleware was skipped (e.g. ``plan_eval`` mode)."""
     trace_id: str = ""
     """Reference into the platform's trace store / Langfuse."""
+    run_correlation: RunCorrelation | None = None
     error_code: CapabilityErrorCode | None = None
     error_message: str = ""
     middleware_trace: tuple[MiddlewareTrace, ...] = ()
@@ -339,6 +342,9 @@ class CapabilityInvocationResult:
             "usage": self.usage.to_dict(),
             "audit_id": self.audit_id,
             "trace_id": self.trace_id,
+            "run_correlation": (
+                self.run_correlation.to_dict() if self.run_correlation else None
+            ),
             "error_code": self.error_code,
             "error_message": self.error_message,
             "middleware_trace": [t.to_dict() for t in self.middleware_trace],
