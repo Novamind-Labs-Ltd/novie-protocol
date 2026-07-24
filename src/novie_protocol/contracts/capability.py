@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from .gates import CapabilityGateDeclaration
+
 CapabilityStatus = Literal["alpha", "beta", "stable", "deprecated", "removed"]
 CapabilityKind = Literal[
     "tool",
@@ -359,6 +361,8 @@ class AgentCapabilityManifestEntry:
     execution_lane: CapabilityExecutionLane = "direct"
     risk_class: CapabilityRiskClass = "read_only"
     governance: CapabilityGovernance = field(default_factory=CapabilityGovernance)
+    side_effect_boundaries: tuple[str, ...] = ()
+    gates: tuple[CapabilityGateDeclaration, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
     canonical_id: str | None = None
     legacy_id: str | None = None
@@ -375,6 +379,8 @@ class AgentCapabilityManifestEntry:
             "input_contracts",
             "caller_types",
             "serves_actions",
+            "side_effect_boundaries",
+            "gates",
         ):
             value = getattr(self, name)
             if not isinstance(value, tuple):
@@ -397,6 +403,25 @@ class AgentCapabilityManifestEntry:
                 for item in self.serves_actions
             ),
         )
+        object.__setattr__(
+            self,
+            "gates",
+            tuple(
+                item
+                if isinstance(item, CapabilityGateDeclaration)
+                else CapabilityGateDeclaration.from_dict(item)
+                for item in self.gates
+            ),
+        )
+        for gate in self.gates:
+            if gate.timing == "pre_side_effect" and (
+                not gate.boundary_id
+                or gate.boundary_id not in self.side_effect_boundaries
+            ):
+                raise ValueError(
+                    f"pre_side_effect gate {gate.gate_key!r} requires a "
+                    "declared side_effect boundary"
+                )
         if isinstance(self.canonical_id, str) and not self.canonical_id.strip():
             object.__setattr__(self, "canonical_id", None)
         if isinstance(self.legacy_id, str) and not self.legacy_id.strip():
@@ -435,6 +460,8 @@ class AgentCapabilityManifestEntry:
             "execution_lane": self.execution_lane,
             "risk_class": self.risk_class,
             "governance": self.governance.to_dict(),
+            "side_effect_boundaries": list(self.side_effect_boundaries),
+            "gates": [item.to_dict() for item in self.gates],
             "metadata": dict(self.metadata),
         }
         if self.canonical_id:
@@ -487,6 +514,13 @@ class AgentCapabilityManifestEntry:
             execution_lane=data.get("execution_lane", "direct"),
             risk_class=data.get("risk_class", "read_only"),
             governance=CapabilityGovernance.from_dict(data.get("governance")),
+            side_effect_boundaries=tuple(
+                str(item) for item in (data.get("side_effect_boundaries") or ())
+            ),
+            gates=tuple(
+                CapabilityGateDeclaration.from_dict(item)
+                for item in (data.get("gates") or ())
+            ),
             metadata=metadata,
             canonical_id=(
                 str(data.get("canonical_id"))

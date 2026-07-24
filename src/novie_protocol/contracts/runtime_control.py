@@ -146,15 +146,46 @@ class RuntimeGate:
     workspace_id: str
     gate_kind: GateKind
     status: GateStatus = "pending"
+    project_id: str = ""
+    plan_id: str = ""
     step_id: str = ""
+    anchor_step_id: str = ""
+    gate_key: str = ""
+    gate_lineage_id: str = ""
+    review_revision: int = 1
+    timing: str = ""
+    sources: tuple[str, ...] = ()
+    source_refs: tuple[str, ...] = ()
     workflow_id: str = ""
     workflow_signal_ref: str = ""   # signal name to send
     current_decision_id: str = ""
     gate_version: int = 0           # monotonically incremented on each decide
     gate_payload: dict[str, Any] = field(default_factory=dict)
+    output_ref: str = ""
+    output_hash: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
     resolved_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sources, tuple):
+            object.__setattr__(self, "sources", tuple(self.sources))
+        if not isinstance(self.source_refs, tuple):
+            object.__setattr__(self, "source_refs", tuple(self.source_refs))
+        anchor = str(self.anchor_step_id or self.step_id or "").strip()
+        object.__setattr__(self, "anchor_step_id", anchor)
+        object.__setattr__(self, "step_id", str(self.step_id or anchor))
+        object.__setattr__(
+            self,
+            "gate_key",
+            str(self.gate_key or self.gate_id).strip(),
+        )
+        object.__setattr__(
+            self,
+            "gate_lineage_id",
+            str(self.gate_lineage_id or self.gate_id).strip(),
+        )
+        object.__setattr__(self, "review_revision", max(1, int(self.review_revision or 1)))
 
 
 @dataclass(frozen=True, slots=True)

@@ -110,6 +110,7 @@ class ExecutionGovernanceGate:
     after_step_id: str
     reason: str
     required_action: str = "approve"
+    timing: str = "post_step"
     payload: dict[str, Any] = field(default_factory=dict)
 
 

@@ -147,7 +147,15 @@ from .failure_taxonomy import (
     ExecutionFailureRecord,
     ExecutionFailureType,
 )
-from .gates import EXECUTION_GATE_ACTIONS, REVIEW_GATE_ACTIONS, GateSpec
+from .gates import (
+    EXECUTION_GATE_ACTIONS,
+    REVIEW_GATE_ACTIONS,
+    CapabilityGateDeclaration,
+    GateContentDeclaration,
+    GateContentKind,
+    GateSpec,
+    GateTiming,
+)
 from .handoff import HandoffEnvelope
 from .member import (
     MemberApprovalContext,
@@ -506,6 +514,7 @@ __all__ = [
     "CapabilityExecutionLane",
     "CapabilityGovernance",
     "CapabilityGovernanceRiskTier",
+    "CapabilityGateDeclaration",
     "CapabilityInvocationTrace",
     "CapabilityInvokeContext",
     "CapabilityInvokeRequest",
@@ -571,7 +580,10 @@ __all__ = [
     "ForkResult",
     "GateRuntimeState",
     "GateRuntimeStatus",
+    "GateContentDeclaration",
+    "GateContentKind",
     "GateSpec",
+    "GateTiming",
     "GovernanceDecision",
     "GovernanceDecisionAction",
     "HandoffEnvelope",
