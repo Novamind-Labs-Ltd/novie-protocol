@@ -712,3 +712,40 @@ def test_schema_url_present() -> None:
     assert manifest["$schema"] == (
         "https://novie.dev/schemas/agent-manifest-v2.json"
     )
+
+
+def test_soft_upstream_marks_non_root_inputs_optional() -> None:
+    """minimum_upstream_artifacts softens upstream evidence into an OR-set."""
+    config = AgentYamlConfig.model_validate({
+        "agent": {
+            "id": "visualizer",
+            "name": "Visualizer",
+            "version": "0.1.0",
+            "type": "artifact_agent",
+        },
+        "capabilities": ["agent.visualizer.render"],
+        "inputs": {"consumes": ["task_brief", "prd_document", "analysis_artifact"]},
+        "outputs": {"provides": ["infographic_artifact"]},
+        "runtime": {"port": 8016},
+        "routing": {
+            "when_to_use": "Turn session docs into an infographic.",
+            "when_not_to_use": "Open-ended chat.",
+        },
+        "advanced": {
+            "capability_overrides": {
+                "agent.visualizer.render": {
+                    "metadata": {"minimum_upstream_artifacts": 1},
+                }
+            }
+        },
+    })
+    entry = generate_agent_manifest(config)["capability_manifest"][0]
+    by_artifact = {c["artifact"]: c for c in entry["input_contracts"]}
+    assert by_artifact["task_brief"]["required"] is True
+    assert by_artifact["prd_document"]["required"] is False
+    assert by_artifact["analysis_artifact"]["required"] is False
+    assert entry["metadata"]["minimum_upstream_artifacts"] == 1
+    assert entry["metadata"]["routing_profile"] == {
+        "when_to_use": ["Turn session docs into an infographic."],
+        "when_not_to_use": ["Open-ended chat."],
+    }

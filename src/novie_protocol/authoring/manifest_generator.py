@@ -144,17 +144,31 @@ def _provides_for_capability(config: AgentYamlConfig, capability_id: str) -> lis
     return list(provides)
 
 
-def _input_contracts_for_consumes(consumes: list[str]) -> list[dict[str, Any]]:
+def _input_contracts_for_consumes(
+    consumes: list[str],
+    *,
+    soft_upstream: bool = False,
+) -> list[dict[str, Any]]:
+    """Build input contracts for ``consumes``.
+
+    Soft upstream (``minimum_upstream_artifacts`` / evidence-style consumers)
+    marks non-root artifacts ``required: false`` so the planner treats them as
+    an OR-set rather than an AND of every listed document.
+    """
     contracts: list[dict[str, Any]] = []
     for artifact in consumes:
         source, provider = _STANDARD_INPUT_PROVIDERS.get(
             artifact,
             ("upstream_capability", ""),
         )
+        # Root/user inputs stay required; soft upstream evidence is optional.
+        required = True
+        if soft_upstream and source == "upstream_capability" and artifact != "task_brief":
+            required = False
         contract: dict[str, Any] = {
             "artifact": artifact,
             "source": source,
-            "required": True,
+            "required": required,
         }
         if provider:
             contract["provider"] = provider
@@ -181,6 +195,8 @@ def _generate_capability_entry(
         if override is not None and override.provides is not None
         else _provides_for_capability(config, capability_id)
     )
+    override_metadata = dict(override.metadata) if override is not None else {}
+    soft_upstream = _is_soft_upstream_consumer(override_metadata)
     input_contracts = []
     if override is not None and override.input_contracts is not None:
         input_contracts = [
@@ -193,7 +209,11 @@ def _generate_capability_entry(
             for contract in config.inputs.input_contracts
         ]
     else:
-        input_contracts = _input_contracts_for_consumes(consumes)
+        input_contracts = _input_contracts_for_consumes(
+            consumes, soft_upstream=soft_upstream,
+        )
+    if soft_upstream:
+        input_contracts = _soften_upstream_input_contracts(input_contracts)
     gates = (
         [
             {
@@ -255,6 +275,16 @@ def _generate_capability_entry(
         },
         "gates": gates,
     }
+    # Planner catalog path only sees per-capability routing_profile; lift
+    # agent-level when_to_use so transform agents stay selectable in menus.
+    routing_profile: dict[str, Any] = {}
+    if config.routing.when_to_use:
+        routing_profile["when_to_use"] = [config.routing.when_to_use]
+    if config.routing.when_not_to_use:
+        routing_profile["when_not_to_use"] = [config.routing.when_not_to_use]
+    metadata: dict[str, Any] = {}
+    if routing_profile:
+        metadata["routing_profile"] = routing_profile
     if override is not None:
         if override.side_effect_boundaries:
             entry["side_effect_boundaries"] = list(
@@ -262,11 +292,34 @@ def _generate_capability_entry(
             )
         if override.caller_types is not None:
             entry["caller_types"] = list(override.caller_types)
-        if override.metadata:
-            metadata = dict(entry.get("metadata") or {})
-            metadata.update(override.metadata)
-            entry["metadata"] = metadata
+        if override_metadata:
+            nested_profile = override_metadata.get("routing_profile")
+            if isinstance(nested_profile, dict):
+                merged_profile = {**routing_profile, **nested_profile}
+                override_metadata = {**override_metadata, "routing_profile": merged_profile}
+            metadata.update(override_metadata)
+    if metadata:
+        entry["metadata"] = metadata
     return entry
+
+
+def _is_soft_upstream_consumer(metadata: dict[str, Any]) -> bool:
+    raw = metadata.get("minimum_upstream_artifacts")
+    return isinstance(raw, int) and raw > 0
+
+
+def _soften_upstream_input_contracts(
+    contracts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    softened: list[dict[str, Any]] = []
+    for contract in contracts:
+        item = dict(contract)
+        artifact = str(item.get("artifact") or "")
+        source = str(item.get("source") or "upstream_capability")
+        if source == "upstream_capability" and artifact != "task_brief":
+            item["required"] = False
+        softened.append(item)
+    return softened
 
 
 def _humanize_capability_id(capability_id: str) -> str:
