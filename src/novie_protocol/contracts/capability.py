@@ -299,6 +299,20 @@ class CapabilityInputContract:
     provider: str = ""
     required: bool = True
 
+    def __post_init__(self) -> None:
+        artifact = str(self.artifact or "").strip()
+        if not artifact:
+            raise ValueError("input contract artifact must be non-empty")
+        if self.source not in {
+            "user_input",
+            "upstream_capability",
+            "runtime_context",
+            "platform_projection",
+        }:
+            raise ValueError(f"unsupported input contract source: {self.source!r}")
+        object.__setattr__(self, "artifact", artifact)
+        object.__setattr__(self, "provider", str(self.provider or "").strip())
+
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
             "artifact": self.artifact,

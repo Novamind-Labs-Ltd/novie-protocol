@@ -164,6 +164,14 @@ class AgentYamlInputContract(_StrictModel):
     provider: str = ""
     required: bool = True
 
+    @field_validator("artifact")
+    @classmethod
+    def _artifact_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("input contract artifact must be non-empty")
+        return value
+
 
 class AgentYamlInputs(_StrictModel):
     """``inputs`` block — what the agent consumes."""
@@ -177,7 +185,7 @@ class AgentYamlInputs(_StrictModel):
             "multi-capability agents."
         ),
     )
-    input_contracts: list[AgentYamlInputContract] = Field(
+    input_contracts: list[AgentYamlInputContract] | dict[str, list[AgentYamlInputContract]] = Field(
         default_factory=list,
         description=(
             "Optional typed source declarations for consumed artifacts. "
@@ -186,6 +194,30 @@ class AgentYamlInputs(_StrictModel):
             "upstream capability."
         ),
     )
+
+    @model_validator(mode="after")
+    def _contracts_are_unique(self) -> AgentYamlInputs:
+        groups = (
+            self.input_contracts.values()
+            if isinstance(self.input_contracts, dict)
+            else (self.input_contracts,)
+        )
+        for contracts in groups:
+            artifacts = [item.artifact for item in contracts]
+            if len(artifacts) != len(set(artifacts)):
+                raise ValueError("input_contracts must not contain duplicate artifacts")
+        if isinstance(self.input_contracts, list) and self.input_contracts:
+            declared = set(self.consumes) if isinstance(self.consumes, list) else {
+                artifact
+                for values in self.consumes.values()
+                for artifact in values
+            }
+            if declared and declared != {item.artifact for item in self.input_contracts}:
+                raise ValueError(
+                    "inputs.consumes must exactly match inputs.input_contracts "
+                    "when typed contracts are declared"
+                )
+        return self
 
 
 class AgentYamlOutputs(_StrictModel):
@@ -378,6 +410,18 @@ class AgentYamlCapabilityOverride(_StrictModel):
     side_effect_boundaries: list[str] = Field(default_factory=list)
     gates: list[AgentYamlCapabilityGate] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _contracts_are_unique(self) -> AgentYamlCapabilityOverride:
+        contracts = self.input_contracts or []
+        artifacts = [item.artifact for item in contracts]
+        if len(artifacts) != len(set(artifacts)):
+            raise ValueError("input_contracts must not contain duplicate artifacts")
+        if contracts and self.consumes is not None and set(self.consumes) != set(artifacts):
+            raise ValueError(
+                "capability override consumes must exactly match input_contracts"
+            )
+        return self
 
     @model_validator(mode="after")
     def _gate_boundaries_are_declared(self) -> AgentYamlCapabilityOverride:

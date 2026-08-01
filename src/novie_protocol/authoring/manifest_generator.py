@@ -144,6 +144,26 @@ def _provides_for_capability(config: AgentYamlConfig, capability_id: str) -> lis
     return list(provides)
 
 
+def _input_contracts_for_capability(
+    config: AgentYamlConfig,
+    capability_id: str,
+) -> list[dict[str, Any]]:
+    declared = config.inputs.input_contracts
+    if isinstance(declared, dict):
+        suffix = capability_id.rsplit(".", 1)[-1]
+        contracts = declared.get(capability_id) or declared.get(suffix) or []
+    else:
+        contracts = declared
+    return [_dump_input_contract(contract) for contract in contracts]
+
+
+def _dump_input_contract(contract: Any) -> dict[str, Any]:
+    value = contract.model_dump(exclude_none=True)
+    if not value.get("provider"):
+        value.pop("provider", None)
+    return value
+
+
 def _input_contracts_for_consumes(
     consumes: list[str],
     *,
@@ -200,17 +220,20 @@ def _generate_capability_entry(
     input_contracts = []
     if override is not None and override.input_contracts is not None:
         input_contracts = [
-            contract.model_dump(exclude_none=True)
+            _dump_input_contract(contract)
             for contract in override.input_contracts
         ]
     elif config.inputs.input_contracts:
-        input_contracts = [
-            contract.model_dump(exclude_none=True)
-            for contract in config.inputs.input_contracts
-        ]
+        input_contracts = _input_contracts_for_capability(config, capability_id)
     else:
         input_contracts = _input_contracts_for_consumes(
             consumes, soft_upstream=soft_upstream,
+        )
+    if input_contracts and set(consumes) != {
+        str(item.get("artifact") or "") for item in input_contracts
+    }:
+        raise ValueError(
+            f"{capability_id}: consumes must exactly match input_contracts"
         )
     if soft_upstream:
         input_contracts = _soften_upstream_input_contracts(input_contracts)

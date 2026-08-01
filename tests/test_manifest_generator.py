@@ -348,6 +348,47 @@ def test_capability_overrides_replace_per_entry_contract() -> None:
     assert edit["metadata"]["disambiguation_policy"] == "branch_by_consumes"
 
 
+def test_input_contracts_can_be_declared_per_capability() -> None:
+    config = AgentYamlConfig.model_validate({
+        "agent": {
+            "id": "architect",
+            "name": "Architect",
+            "version": "0.2.0",
+            "type": "artifact_agent",
+        },
+        "capabilities": [
+            "agent.architect.create_architecture",
+            "agent.architect.create_implementation_plan",
+        ],
+        "inputs": {
+            "consumes": {
+                "create_architecture": ["task_brief", "prd_document"],
+                "create_implementation_plan": ["task_brief"],
+            },
+            "input_contracts": {
+                "create_architecture": [
+                    {"artifact": "task_brief", "source": "user_input"},
+                    {"artifact": "prd_document", "required": False},
+                ],
+                "create_implementation_plan": [
+                    {"artifact": "task_brief", "source": "user_input"},
+                ],
+            },
+        },
+        "outputs": {"provides": {"create_architecture": ["architecture_document"]}},
+        "runtime": {"port": 8011},
+    })
+
+    entries = {
+        item["capability_id"]: item
+        for item in generate_agent_manifest(config)["capability_manifest"]
+    }
+    assert entries["agent.architect.create_architecture"]["input_contracts"] == [
+        {"artifact": "task_brief", "source": "user_input", "required": True},
+        {"artifact": "prd_document", "source": "upstream_capability", "required": False},
+    ]
+
+
 def test_capability_override_emits_post_step_gate_on_matching_entry() -> None:
     payload = _minimal_config().model_dump()
     payload["capabilities"] = [
