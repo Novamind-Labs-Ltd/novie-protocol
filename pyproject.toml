@@ -1,6 +1,6 @@
 [project]
 name = "novie-protocol"
-version = "0.1.8"
+version = "0.1.9"
 description = "Novie 平台与专家 Agent 之间的共享协议层（contracts / services / agents / events）。"
 readme = "README.md"
 requires-python = ">=3.14"
