@@ -40,7 +40,7 @@ from .context import ExecutionContext
 from .run_correlation import RunCorrelation
 
 SessionEventSource = Literal[
-    "chat", "planning", "dispatch", "gate", "callback", "system",
+    "chat", "planning", "dispatch", "gate", "callback", "system", "work_agent",
 ]
 """``SessionEvent.source`` 的稳定枚举。
 
@@ -54,6 +54,8 @@ SessionEventSource = Literal[
 - ``callback`` ：agent 通过 callback server 反向调用平台时产生的关键事件。
 - ``system``   ：由 ``SessionTimelineService`` 自身写入的 envelope 元事件
   （session 创建 / 关闭等）。
+- ``work_agent``：WorkAgent loop（ADR-132）自身投影的事件——能力审批门的
+  ``gate_pending`` / ``gate_resolved`` 等。
 """
 
 
