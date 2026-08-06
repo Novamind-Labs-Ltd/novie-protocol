@@ -60,6 +60,17 @@ class ResourceRef:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ResourceRef:
+        missing = [
+            key
+            for key in ("provider_id", "resource_type", "resource_id")
+            if not str(data.get(key) or "").strip()
+        ]
+        if missing:
+            raise ValueError(
+                f"ResourceRef is missing {missing}; required fields are "
+                "['provider_id', 'resource_type', 'resource_id'] "
+                "(optional: external_id)"
+            )
         return cls(
             provider_id=str(data["provider_id"]),
             resource_type=str(data["resource_type"]),
