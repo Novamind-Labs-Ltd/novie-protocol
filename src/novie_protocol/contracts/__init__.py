@@ -100,6 +100,20 @@ from .change_events import (
     ChangeEventSource,
     new_change_event,
 )
+from .executor_features import ExecutorFeatureSet, features_from_mapping
+from .llm_credential import LlmCredentialClaims, LlmCredentialError, mint_llm_credential, verify_llm_credential
+from .a2a_envelope import sign_headers as sign_a2a_headers, verify_envelope as verify_a2a_envelope
+from .agent_runtime import (
+    SCHEMA_VERSION as AGENT_RUN_SCHEMA_VERSION,
+    SIDE_EFFECT_CLASSES,
+    AgentRunContractError,
+    AgentRunInput,
+    AgentRunResult,
+    ExecutionMandate,
+    SkillRef,
+    WorkspaceDescriptor,
+    parse_run_input,
+)
 from .context import ExecutionContext, IdentityContext, TenantScope, TrustedHeaders
 from .run_correlation import RunCorrelation
 from .decision_gate import (
@@ -430,6 +444,23 @@ from .workflow_stream import (
 )
 
 __all__ = [
+    "ExecutorFeatureSet",
+    "features_from_mapping",
+    "LlmCredentialClaims",
+    "LlmCredentialError",
+    "mint_llm_credential",
+    "verify_llm_credential",
+    "sign_a2a_headers",
+    "verify_a2a_envelope",
+    "AGENT_RUN_SCHEMA_VERSION",
+    "SIDE_EFFECT_CLASSES",
+    "AgentRunContractError",
+    "AgentRunInput",
+    "AgentRunResult",
+    "ExecutionMandate",
+    "SkillRef",
+    "WorkspaceDescriptor",
+    "parse_run_input",
     "ANALYST_DECISION_GATE_TYPES",
     "BALANCED_POLICY",
     "CANONICAL_PRESETS",
